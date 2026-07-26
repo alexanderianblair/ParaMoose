@@ -144,6 +144,33 @@ Notes/limitations:
   for ParaView's own session cleanup, consistent with how the main
   mesh/result sources are already handled elsewhere in this plugin.
 
+## Raw text preview
+
+The **Raw Text** tab (next to **Structured**) shows exactly what
+`render()` would write to disk - white text on black, monospace, editable.
+It's kept in sync with the structured tree/table view explicitly rather
+than live, so neither view can silently clobber work-in-progress in the
+other:
+
+- **Apply Changes** re-parses whatever's in the raw text editor through
+  the same `hit::parse()` path as opening a file, replacing the structured
+  tree/table with the result. After applying, the raw text box refreshes
+  to show the *canonical* re-rendered form of what you typed - useful as
+  confirmation of what actually got parsed, but it does mean any
+  formatting/whitespace quirks in what you typed won't survive Apply
+  verbatim.
+- **Refresh from Model** re-renders the current structured state into the
+  raw text box, discarding anything typed there that hasn't been applied
+  (asks for confirmation if there's anything to lose).
+- Switching to the Raw Text tab auto-refreshes it from the model, but only
+  if there's nothing unapplied already sitting in the editor - so
+  flipping back and forth between tabs never destroys in-progress typing.
+
+**Important:** unapplied raw text edits are not included when you hit
+**Save** - Save always writes the current *structured* model, not
+whatever's in the raw text box. Click **Apply Changes** first if you've
+been editing there.
+
 ## Known limitations (read before relying on this)
 
 1. **`resetToNewRoot()`/"New" assumes `hit::parse(fname, "")` succeeds** and

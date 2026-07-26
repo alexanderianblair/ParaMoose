@@ -28,6 +28,7 @@
 #include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QFont>
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QInputDialog>
@@ -38,11 +39,13 @@
 #include <QMessageBox>
 #include <QMetaType>
 #include <QPoint>
+#include <QPlainTextEdit>
 #include <QProcess>
 #include <QPushButton>
 #include <QSplitter>
 #include <QStringList>
 #include <QTableWidget>
+#include <QTabWidget>
 #include <QTextStream>
 #include <QToolBar>
 #include <QTreeWidget>
@@ -275,8 +278,40 @@ void MooseHitEditorPanel::buildUi()
   splitter->setStretchFactor(0, 1);
   splitter->setStretchFactor(1, 2);
 
+  // --- Raw text tab -----------------------------------------------
+  // An editable preview of exactly what render() would write to disk.
+  // Deliberately NOT kept live in sync with the structured view on every
+  // keystroke in either direction -- see onMainTabChanged()/onApplyRawText()
+  // /onRefreshRawTextFromModel() for how the two stay in sync without
+  // either one silently clobbering unapplied edits in the other.
+  QWidget* rawTextPage = new QWidget();
+  QVBoxLayout* rawTextLayout = new QVBoxLayout(rawTextPage);
+  rawTextLayout->setContentsMargins(0, 0, 0, 0);
+
+  QToolBar* rawTextToolbar = new QToolBar(rawTextPage);
+  QAction* applyRawAction = rawTextToolbar->addAction(tr("Apply Changes"));
+  QAction* refreshRawAction = rawTextToolbar->addAction(tr("Refresh from Model"));
+  connect(applyRawAction, &QAction::triggered, this, &MooseHitEditorPanel::onApplyRawText);
+  connect(refreshRawAction, &QAction::triggered, this, &MooseHitEditorPanel::onRefreshRawTextFromModel);
+  rawTextLayout->addWidget(rawTextToolbar);
+
+  this->RawTextEdit = new QPlainTextEdit(rawTextPage);
+  this->RawTextEdit->setLineWrapMode(QPlainTextEdit::NoWrap);
+  QFont rawTextFont("Monospace");
+  rawTextFont.setStyleHint(QFont::TypeWriter);
+  this->RawTextEdit->setFont(rawTextFont);
+  this->RawTextEdit->setStyleSheet(
+    "QPlainTextEdit { background-color: #000000; color: #ffffff; "
+    "selection-background-color: #444444; }");
+  rawTextLayout->addWidget(this->RawTextEdit, 1);
+
+  this->MainTabs = new QTabWidget(container);
+  this->MainTabs->addTab(splitter, tr("Structured"));
+  this->RawTextTabIndex = this->MainTabs->addTab(rawTextPage, tr("Raw Text"));
+  connect(this->MainTabs, &QTabWidget::currentChanged, this, &MooseHitEditorPanel::onMainTabChanged);
+
   QSplitter* verticalSplitter = new QSplitter(Qt::Vertical, container);
-  verticalSplitter->addWidget(splitter);
+  verticalSplitter->addWidget(this->MainTabs);
 
   this->OutputWidget = new pqOutputWidget(verticalSplitter);
   this->OutputWidget->setSettingsKey("ParaMooseSolverOutput");
@@ -313,6 +348,11 @@ void MooseHitEditorPanel::setRootFromParsedText(const QString& fname, const QStr
     }
     QMessageBox::warning(this, tr("Parsed with warnings"), msg);
   }
+
+  // Every path that replaces RootNode (New, Open, and Apply Changes on the
+  // Raw Text tab) funnels through here, so this is the one place that
+  // needs to re-sync the raw text preview to match.
+  // this->refreshRawTextFromModel();
 }
 
 void MooseHitEditorPanel::resetToNewRoot()
@@ -323,6 +363,82 @@ void MooseHitEditorPanel::resetToNewRoot()
   this->markDirty(false);
   this->SaveAction->setEnabled(true);
   this->RunAction->setEnabled(false);
+}
+
+// ---------------------------------------------------------------------------
+// Raw text tab: an editable render() preview. The two views (structured
+// tree/table vs. raw text) are kept in sync explicitly rather than live,
+// on the theory that silently overwriting whichever one the person didn't
+// just touch is worse than asking. Three sync points:
+//   - refreshRawTextFromModel(): raw text <- model (always available via
+//     the "Refresh from Model" button; also called automatically by
+//     setRootFromParsedText() whenever RootNode is replaced).
+//   - onApplyRawText(): model <- raw text (re-parses the edited text
+//     through the same hit::parse() path as opening a file).
+//   - onMainTabChanged(): auto-refreshes raw text from the model when
+//     switching TO that tab, but only if there are no unapplied edits
+//     already sitting there (compared against LastSyncedRawText) --
+//     switching tabs back and forth never destroys in-progress typing.
+// ---------------------------------------------------------------------------
+void MooseHitEditorPanel::refreshRawTextFromModel()
+{
+  if (!this->RawTextEdit)
+  {
+    // Called once already during the very first setRootFromParsedText()
+    // in buildUi(), by which point RawTextEdit exists -- this guard is
+    // just defensive in case that ordering ever changes.
+    return;
+  }
+  QString text = this->RootNode ? QString::fromStdString(this->RootNode->render()) : QString();
+  this->RawTextEdit->setPlainText(text);
+  this->LastSyncedRawText = text;
+}
+
+void MooseHitEditorPanel::onMainTabChanged(int index)
+{
+  if (index != this->RawTextTabIndex)
+  {
+    return;
+  }
+  if (this->RawTextEdit->toPlainText() == this->LastSyncedRawText)
+  {
+    // Nothing unapplied sitting in the editor -- safe to pull in whatever
+    // changed on the structured side since we last showed this tab.
+    this->refreshRawTextFromModel();
+  }
+}
+
+void MooseHitEditorPanel::onRefreshRawTextFromModel()
+{
+  if (this->RawTextEdit->toPlainText() != this->LastSyncedRawText)
+  {
+    auto reply = QMessageBox::question(this, tr("Discard raw text edits?"),
+      tr("The raw text has changes that haven't been applied. Refreshing from the model will "
+         "discard them. Continue?"));
+    if (reply != QMessageBox::Yes)
+    {
+      return;
+    }
+  }
+  this->refreshRawTextFromModel();
+}
+
+void MooseHitEditorPanel::onApplyRawText()
+{
+  QString text = this->RawTextEdit->toPlainText();
+  QString fname = this->CurrentFilePath.isEmpty() ? QStringLiteral("raw_text_edit") : this->CurrentFilePath;
+
+  // setRootFromParsedText() replaces RootNode wholesale, which invalidates
+  // every hit::Node* the tree/table currently hold onto -- clear the
+  // param table (rebuildTree() below handles the tree itself) before it
+  // runs so nothing dangles in between. It also re-syncs RawTextEdit
+  // itself afterward (see its own comment), so what's shown after Apply
+  // is the canonical re-rendered form of what was just typed, which
+  // doubles as a way to confirm what was actually parsed.
+  this->ParamTable->setRowCount(0);
+  this->setRootFromParsedText(fname, text);
+  this->rebuildTree();
+  this->markDirty(true);
 }
 
 void MooseHitEditorPanel::onNewFile()

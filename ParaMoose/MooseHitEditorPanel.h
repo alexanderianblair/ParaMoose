@@ -11,7 +11,8 @@
 //
 // Layout:
 //   [ toolbar: New | Open | Save | Save As | Run | View Mesh | Load Schema ]
-//   [ tree of blocks (left) | parameter table for selected block (right) ]
+//   [ tabs: "Structured" (tree + parameter table) | "Raw Text" (editable
+//     render() preview, synced explicitly via Apply/Refresh, not live) ]
 //   [ pqOutputWidget: streamed solver output from "Run + Load Result" ]
 
 #pragma once
@@ -27,6 +28,8 @@ class QAction;
 class QLineEdit;
 class QLabel;
 class QProcess;
+class QTabWidget;
+class QPlainTextEdit;
 class pqOutputWidget;
 class pqPipelineSource;
 class pqDataRepresentation;
@@ -68,6 +71,10 @@ private slots:
   void onAddParamRow();
   void onRemoveParamRow();
 
+  void onMainTabChanged(int index);
+  void onApplyRawText();
+  void onRefreshRawTextFromModel();
+
 private:
   void buildUi();
   void resetToNewRoot();
@@ -87,6 +94,7 @@ private:
   void ensureHighlightSource(const QString& meshFilePath);
   void updateHighlight(hit::Node* fieldNode, const QString& paramName);
   void clearHighlight();
+  void refreshRawTextFromModel();
 
   QTreeWidget* Tree = nullptr;
   QTableWidget* ParamTable = nullptr;
@@ -96,6 +104,17 @@ private:
   QLineEdit* ExecutablePathEdit = nullptr;
   QLabel* SchemaStatusLabel = nullptr;
   pqOutputWidget* OutputWidget = nullptr;
+  QTabWidget* MainTabs = nullptr;
+  QPlainTextEdit* RawTextEdit = nullptr;
+  int RawTextTabIndex = -1;
+
+  // The text most recently written into RawTextEdit by this code (either
+  // from refreshRawTextFromModel() or right after a successful Apply).
+  // Comparing RawTextEdit's current text against this is how tab-switch
+  // auto-refresh and the Refresh button decide whether there are
+  // unapplied edits it would be destroying -- see onMainTabChanged() and
+  // onRefreshRawTextFromModel().
+  QString LastSyncedRawText;
 
   // Non-null only while a solve launched via onRunSolve() is in flight.
   // Owned via QObject parenting (constructed with `this` as parent) but
