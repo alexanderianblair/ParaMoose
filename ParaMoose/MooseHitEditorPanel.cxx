@@ -10,6 +10,7 @@
 #include "pqActiveObjects.h"
 #include "pqApplicationCore.h"
 #include "pqObjectBuilder.h"
+#include "pqOutputWidget.h"
 #include "pqPipelineSource.h"
 #include "pqServer.h"
 
@@ -93,6 +94,11 @@ MooseHitEditorPanel::MooseHitEditorPanel(QWidget* parentWidget)
 
 MooseHitEditorPanel::~MooseHitEditorPanel()
 {
+  if (this->SolveProcess)
+  {
+    this->SolveProcess->kill();
+    this->SolveProcess->waitForFinished(3000);
+  }
   delete this->RootNode;
 }
 
@@ -182,7 +188,16 @@ void MooseHitEditorPanel::buildUi()
   splitter->setStretchFactor(0, 1);
   splitter->setStretchFactor(1, 2);
 
-  mainLayout->addWidget(splitter, 1);
+  QSplitter* verticalSplitter = new QSplitter(Qt::Vertical, container);
+  verticalSplitter->addWidget(splitter);
+
+  this->OutputWidget = new pqOutputWidget(verticalSplitter);
+  this->OutputWidget->setSettingsKey("ParaMooseSolverOutput");
+  verticalSplitter->addWidget(this->OutputWidget);
+  verticalSplitter->setStretchFactor(0, 3);
+  verticalSplitter->setStretchFactor(1, 1);
+
+  mainLayout->addWidget(verticalSplitter, 1);
 
   this->setWidget(container);
   this->resetToNewRoot();
@@ -339,6 +354,11 @@ void MooseHitEditorPanel::onRunSolve()
     QMessageBox::information(this, tr("Save first"), tr("Save the input file before running."));
     return;
   }
+  if (this->SolveProcess)
+  {
+    QMessageBox::information(this, tr("Already running"), tr("A solve is already in progress."));
+    return;
+  }
   QString exe = this->ExecutablePathEdit->text().trimmed();
   if (exe.isEmpty() || !QFileInfo::exists(exe))
   {
@@ -348,51 +368,89 @@ void MooseHitEditorPanel::onRunSolve()
   }
 
   QFileInfo inputInfo(this->CurrentFilePath);
-  QStringList args;
-  args << "-i" << inputInfo.fileName();
 
-  QProcess process;
-  process.setWorkingDirectory(inputInfo.absolutePath());
-  process.setProgram(exe);
-  process.setArguments(args);
-  process.setProcessChannelMode(QProcess::MergedChannels);
+  this->OutputWidget->clear();
+  this->OutputWidget->displayMessage(tr("Running: %1 -i %2").arg(exe, inputInfo.fileName()));
+  this->RunAction->setEnabled(false);
 
-  process.start();
-  if (!process.waitForStarted())
-  {
-    QMessageBox::warning(this, tr("Run failed"), tr("Could not start %1").arg(exe));
-    return;
-  }
-  // NOTE: for a real plugin, prefer running this asynchronously and
-  // streaming output to a log widget (or a pqOutputWidget) instead of
-  // blocking the UI thread with waitForFinished(). Kept synchronous here
-  // to keep the example short.
-  process.waitForFinished(-1);
+  // Parented to `this` for Qt's ownership tree as a fallback, but the
+  // finished()/errorOccurred() handlers below deleteLater() it explicitly
+  // and null out SolveProcess as soon as the run is over, since that null
+  // check is also how the rest of the panel knows whether a solve is
+  // currently in flight.
+  this->SolveProcess = new QProcess(this);
+  this->SolveProcess->setWorkingDirectory(inputInfo.absolutePath());
+  this->SolveProcess->setProgram(exe);
+  this->SolveProcess->setArguments(QStringList() << "-i" << inputInfo.fileName());
+  this->SolveProcess->setProcessChannelMode(QProcess::MergedChannels);
 
-  QString output = QString::fromLocal8Bit(process.readAll());
-  if (process.exitStatus() != QProcess::NormalExit || process.exitCode() != 0)
-  {
-    QMessageBox::warning(this, tr("Solve failed"), output);
-    return;
-  }
+  connect(this->SolveProcess, &QProcess::readyReadStandardOutput, this, [this]() {
+    if (!this->SolveProcess)
+    {
+      return;
+    }
+    QString chunk = QString::fromLocal8Bit(this->SolveProcess->readAllStandardOutput());
+    for (const QString& line : chunk.split('\n', Qt::SkipEmptyParts))
+    {
+      this->OutputWidget->displayMessage(line);
+    }
+  });
 
-  // MOOSE's default output naming is "<input-file-stem>_out.e".
-  QString resultPath = inputInfo.absolutePath() + "/" + inputInfo.completeBaseName() + "_out.e";
-  if (!QFileInfo::exists(resultPath))
-  {
-    QMessageBox::information(this, tr("Solve finished"),
-      tr("Run completed but the expected result file was not found:\n%1").arg(resultPath));
-    return;
-  }
+  connect(this->SolveProcess, &QProcess::errorOccurred, this, [this](QProcess::ProcessError) {
+    this->OutputWidget->displayMessage(tr("Failed to start solver process."), QtCriticalMsg);
+    this->RunAction->setEnabled(true);
+    if (this->SolveProcess)
+    {
+      this->SolveProcess->deleteLater();
+      this->SolveProcess = nullptr;
+    }
+  });
 
-  pqObjectBuilder* builder = pqApplicationCore::instance()->getObjectBuilder();
-  pqServer* server = pqActiveObjects::instance().activeServer();
-  pqPipelineSource* source =
-    builder->createReader("sources", "ExodusIIReader", QStringList(resultPath), server);
-  if (source)
-  {
-    source->updatePipeline();
-  }
+  connect(this->SolveProcess,
+    static_cast<void (QProcess::*)(int, QProcess::ExitStatus)>(&QProcess::finished), this,
+    [this, inputInfo](int exitCode, QProcess::ExitStatus exitStatus) {
+      this->RunAction->setEnabled(true);
+
+      if (exitStatus != QProcess::NormalExit || exitCode != 0)
+      {
+        this->OutputWidget->displayMessage(
+          tr("Solve failed (exit code %1). See output above.").arg(exitCode), QtCriticalMsg);
+        if (this->SolveProcess)
+        {
+          this->SolveProcess->deleteLater();
+          this->SolveProcess = nullptr;
+        }
+        return;
+      }
+      this->OutputWidget->displayMessage(tr("Solve finished successfully."));
+
+      // MOOSE's default output naming is "<input-file-stem>_out.e".
+      QString resultPath = inputInfo.absolutePath() + "/" + inputInfo.completeBaseName() + "_out.e";
+      if (!QFileInfo::exists(resultPath))
+      {
+        this->OutputWidget->displayMessage(
+          tr("Expected result file not found: %1").arg(resultPath), QtWarningMsg);
+      }
+      else
+      {
+        pqObjectBuilder* builder = pqApplicationCore::instance()->getObjectBuilder();
+        pqServer* server = pqActiveObjects::instance().activeServer();
+        pqPipelineSource* source =
+          builder->createReader("sources", "ExodusIIReader", QStringList(resultPath), server);
+        if (source)
+        {
+          source->updatePipeline();
+        }
+      }
+
+      if (this->SolveProcess)
+      {
+        this->SolveProcess->deleteLater();
+        this->SolveProcess = nullptr;
+      }
+    });
+
+  this->SolveProcess->start();
 }
 
 // ---------------------------------------------------------------------------

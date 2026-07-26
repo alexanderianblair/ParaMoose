@@ -111,21 +111,22 @@ pick a valid one when it can.
    about, and parameter docs/options are looked up by name globally rather
    than strictly scoped to the exact block path - see the note at the top
    of `MooseSchema.h`.
-3. **`onRunSolve()` runs synchronously** (`waitForFinished(-1)`), which
-   blocks the ParaView UI thread for the duration of the solve. Fine for a
-   quick demo; for real use, run the `QProcess` asynchronously and stream
-   output into a log widget (ParaView has `pqOutputWidget` for exactly
-   this) instead.
-4. **CMake macro names shift between ParaView versions.** This example
+3. **CMake macro names shift between ParaView versions.** This example
    uses `paraview_plugin_add_dock_window()` / `paraview_add_plugin()`,
    matching the `Examples/Plugins/DockWidget` example shipped with recent
    (5.9+) ParaView releases. If your ParaView is older, check that example
    in your own ParaView source tree for the exact macro signatures - older
    releases used `ADD_PARAVIEW_DOCK_WINDOW()` / `ADD_PARAVIEW_PLUGIN()`
    instead.
-5. **No comment/blank-line authoring in the UI**, even though they now
+4. **No comment/blank-line authoring in the UI**, even though they now
    survive round-trips elsewhere in the file - see the caveat at the end of
    "The hit parser" above.
+5. **The run's `finished`/`errorOccurred` handlers aren't hardened against
+   every edge case** - e.g. if the panel is closed mid-solve, the
+   destructor kills the process but the in-flight signal handlers still
+   reference panel members briefly during teardown. Fine for normal usage
+   (they're no-ops once the process is gone); a production version would
+   want more defensive lifetime handling here.
 
 ## Building
 
@@ -191,10 +192,13 @@ that's what you're working with.
    parameters for the selected block.
 4. **Save** / **Save As...** writes the tree back out in hit format.
 5. Optionally set **App executable** to your compiled MOOSE app, then
-   **Run + Load Result** — this shells out to `<exe> -i <file>`, and on
-   success loads `<stem>_out.e` into the active ParaView pipeline using
-   ParaView's own Exodus reader, so you immediately see the mesh/fields in
-   the render view.
+   **Run + Load Result**. This shells out to `<exe> -i <file>`
+   asynchronously - the ParaView UI stays responsive, and solver output
+   streams live into the **Solver Output** panel at the bottom (a
+   `pqOutputWidget`, same widget ParaView uses for its own message log) as
+   the run progresses. On success, `<stem>_out.e` loads automatically into
+   the active ParaView pipeline via ParaView's own Exodus reader. **Run +
+   Load Result** is disabled while a solve is in flight.
 6. Optionally click **Load App Schema...** (same executable) to enable the
    type/enum dropdowns and tooltips described in "Schema awareness" above.
 7. Click **View Mesh** to load the mesh referenced by the `[Mesh]` block

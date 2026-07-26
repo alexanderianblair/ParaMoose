@@ -12,6 +12,7 @@
 // Layout:
 //   [ toolbar: New | Open | Save | Save As | Run | View Mesh | Load Schema ]
 //   [ tree of blocks (left) | parameter table for selected block (right) ]
+//   [ pqOutputWidget: streamed solver output from "Run + Load Result" ]
 
 #pragma once
 
@@ -25,6 +26,8 @@ class QTableWidget;
 class QAction;
 class QLineEdit;
 class QLabel;
+class QProcess;
+class pqOutputWidget;
 
 namespace hit
 {
@@ -86,6 +89,12 @@ private:
   QAction* ViewMeshAction = nullptr;
   QLineEdit* ExecutablePathEdit = nullptr;
   QLabel* SchemaStatusLabel = nullptr;
+  pqOutputWidget* OutputWidget = nullptr;
+
+  // Non-null only while a solve launched via onRunSolve() is in flight.
+  // Owned via QObject parenting (constructed with `this` as parent) but
+  // also explicitly deleteLater()'d on completion; see onRunSolve().
+  QProcess* SolveProcess = nullptr;
 
   // Owning pointer to the root of the currently-open hit tree. hit::Node's
   // destructor recursively deletes its children (and safely unlinks
