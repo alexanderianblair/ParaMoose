@@ -133,6 +133,11 @@ void MooseHitEditorPanel::buildUi()
   execLayout->addWidget(new QLabel(tr("App executable:"), execRow));
   this->ExecutablePathEdit = new QLineEdit(execRow);
   this->ExecutablePathEdit->setPlaceholderText(tr("/path/to/your-app-opt"));
+#ifdef MOOSE_DEFAULT_APP_EXECUTABLE
+  // Set via -DMOOSE_DIR=... at configure time (see CMakeLists.txt); just a
+  // starting point, still fully editable.
+  this->ExecutablePathEdit->setText(QStringLiteral(MOOSE_DEFAULT_APP_EXECUTABLE));
+#endif
   execLayout->addWidget(this->ExecutablePathEdit);
   mainLayout->addWidget(execRow);
 

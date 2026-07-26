@@ -79,6 +79,14 @@ target_link_libraries(ParaMoose
     hit
 )
 
+# Pre-fill the "App executable" field with MOOSE's own test app, built from
+# the same MOOSE_DIR the person already had to point us at for hit/WASP.
+# Still just a starting point in an editable field -- real apps live
+# elsewhere, this just saves retyping the obvious default while testing.
+target_compile_definitions(ParaMoose PRIVATE
+  "MOOSE_DEFAULT_APP_EXECUTABLE=\"${MOOSE_DIR}/test/moose_test-opt\""
+)
+
 # WASP's shared libraries live under WASP_DIR, which usually isn't on the
 # system's normal linker search path -- bake in an rpath so ParaView can
 # actually find them at runtime when it loads ParaMoose.so.

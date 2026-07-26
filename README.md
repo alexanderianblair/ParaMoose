@@ -171,6 +171,12 @@ This produces `ParaMoose.so` (Linux/macOS) or
 
 ## Using it
 
+The **App executable** field starts pre-filled with
+`<MOOSE_DIR>/test/moose_test-opt` (MOOSE's own test application), derived
+from the `MOOSE_DIR` you passed at configure time - it's just a starting
+point and stays fully editable, so point it at your actual app instead if
+that's what you're working with.
+
 1. Click **Open...**, pick a `.i` file, or click **New** to start from a
    blank input (the panel actually starts with a blank one already, so you
    can begin adding blocks immediately without opening or saving anything
