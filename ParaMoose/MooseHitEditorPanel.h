@@ -1,16 +1,17 @@
 // MooseHitEditorPanel.h
 //
 // A ParaView dock-widget panel that opens, edits, and saves MOOSE "hit"
-// input files (.i) from within the ParaView GUI.
+// input files (.i) from within the ParaView GUI, using MOOSE's own hit
+// parser/renderer (framework/contrib/hit) rather than a hand-rolled one --
+// see MooseHitEditorPanel.cxx and the top-level README for what that buys
+// you (full grammar support, correct quoting/escaping, and formatting
+// fidelity on save) and what it still doesn't (in-place comment editing;
+// comments outside edited regions are preserved by render(), but this UI
+// has no way to add/see them).
 //
 // Layout:
-//   [ toolbar: Open | Save | Save As ]
+//   [ toolbar: New | Open | Save | Save As | Run | View Mesh | Load Schema ]
 //   [ tree of blocks (left) | parameter table for selected block (right) ]
-//
-// After saving, the panel can optionally run the associated MOOSE
-// executable and load the resulting Exodus file into the active ParaView
-// pipeline -- see runSolveAndLoadResult() -- so the same panel drives both
-// "edit the input" and "see the result" without leaving ParaView.
 
 #pragma once
 
@@ -18,15 +19,17 @@
 
 #include <QDockWidget>
 
-#include <memory>
-
 class QTreeWidget;
 class QTreeWidgetItem;
 class QTableWidget;
 class QAction;
 class QLineEdit;
 class QLabel;
-struct HitNode;
+
+namespace hit
+{
+class Node;
+}
 
 class MooseHitEditorPanel : public QDockWidget
 {
@@ -62,16 +65,17 @@ private slots:
 private:
   void buildUi();
   void resetToNewRoot();
+  void setRootFromParsedText(const QString& fname, const QString& text);
   void loadFile(const QString& filePath);
   void saveToPath(const QString& filePath);
   void rebuildTree();
-  void addTreeItemsRecursive(QTreeWidgetItem* parentItem, const std::shared_ptr<HitNode>& node);
-  void addBlockUnder(HitNode* parentNode, QTreeWidgetItem* parentItem);
-  void populateParamTableFor(HitNode* node);
-  HitNode* nodeForItem(QTreeWidgetItem* item) const;
+  void addTreeItemsRecursive(QTreeWidgetItem* parentItem, hit::Node* node);
+  void addBlockUnder(hit::Node* parentNode, QTreeWidgetItem* parentItem);
+  void populateParamTableFor(hit::Node* node);
+  hit::Node* nodeForItem(QTreeWidgetItem* item) const;
   void markDirty(bool dirty);
   void updateWindowTitleForFile();
-  QString topLevelBlockName(HitNode* node) const;
+  QString topLevelBlockName(hit::Node* node) const;
   QString findMeshFile() const;
   QString resolveInputRelativePath(const QString& maybeRelative) const;
 
@@ -83,7 +87,12 @@ private:
   QLineEdit* ExecutablePathEdit = nullptr;
   QLabel* SchemaStatusLabel = nullptr;
 
-  std::shared_ptr<HitNode> RootNode;
+  // Owning pointer to the root of the currently-open hit tree. hit::Node's
+  // destructor recursively deletes its children (and safely unlinks
+  // itself from its parent, confirmed against MOOSE's own
+  // framework/contrib/hit source), so this is the single point of
+  // ownership -- delete it whenever replacing it, and in the destructor.
+  hit::Node* RootNode = nullptr;
   QString CurrentFilePath;
   bool Dirty = false;
 

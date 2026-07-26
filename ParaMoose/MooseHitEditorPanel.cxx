@@ -1,6 +1,10 @@
 // MooseHitEditorPanel.cxx
 #include "MooseHitEditorPanel.h"
-#include "HitParser.h"
+
+// MOOSE's real hit parser (framework/contrib/hit). See CMakeLists.txt for
+// how this gets built/linked (it depends on WASP, a separate compiled
+// library that MOOSE builds alongside it).
+#include "hit/hit.h"
 
 // ParaView / pqCore
 #include "pqActiveObjects.h"
@@ -21,12 +25,14 @@
 #include <QLineEdit>
 #include <QMenu>
 #include <QMessageBox>
-#include <QProcess>
+#include <QMetaType>
 #include <QPoint>
+#include <QProcess>
 #include <QPushButton>
 #include <QSplitter>
 #include <QStringList>
 #include <QTableWidget>
+#include <QTextStream>
 #include <QToolBar>
 #include <QTreeWidget>
 #include <QVBoxLayout>
@@ -35,29 +41,35 @@
 
 #include <algorithm>
 
+// Lets QVariant carry raw hit::Node pointers (used to tag tree items and
+// parameter-table rows with the tree node they represent). Only used
+// within this translation unit, so declaring it here rather than in a
+// header is fine.
+Q_DECLARE_METATYPE(hit::Node*)
+
 namespace
 {
 const int NameColumn = 0;
 const int ValueColumn = 1;
 
-// Depth-first search for the first parameter literally named "file"
-// anywhere in node's subtree (its own params first, then children in
-// order). Covers both the classic `[Mesh] type = FileMesh file = ...`
-// style and newer MeshGenerator-nested styles, since either way the file
-// path shows up as a `file = ...` parameter somewhere under [Mesh].
-bool findFileParamRecursive(const HitNode* node, std::string& valueOut)
+// Depth-first search for the first Field literally named "file" anywhere
+// in node's subtree (its own fields first, then child sections in order).
+// Covers both the classic `[Mesh] type = FileMesh file = ...` style and
+// newer MeshGenerator-nested styles, since either way the file path shows
+// up as a `file = ...` field somewhere under [Mesh].
+bool findFileParamRecursive(hit::Node* node, std::string& valueOut)
 {
-  for (const auto& p : node->params)
+  for (hit::Node* field : node->children(hit::NodeType::Field))
   {
-    if (p.name == "file")
+    if (field->path() == "file")
     {
-      valueOut = p.value;
+      valueOut = field->strVal();
       return true;
     }
   }
-  for (const auto& child : node->children)
+  for (hit::Node* section : node->children(hit::NodeType::Section))
   {
-    if (findFileParamRecursive(child.get(), valueOut))
+    if (findFileParamRecursive(section, valueOut))
     {
       return true;
     }
@@ -79,7 +91,10 @@ MooseHitEditorPanel::MooseHitEditorPanel(QWidget* parentWidget)
   this->buildUi();
 }
 
-MooseHitEditorPanel::~MooseHitEditorPanel() = default;
+MooseHitEditorPanel::~MooseHitEditorPanel()
+{
+  delete this->RootNode;
+}
 
 void MooseHitEditorPanel::buildUi()
 {
@@ -168,9 +183,34 @@ void MooseHitEditorPanel::buildUi()
   this->resetToNewRoot();
 }
 
+// ---------------------------------------------------------------------------
+// File I/O
+// ---------------------------------------------------------------------------
+void MooseHitEditorPanel::setRootFromParsedText(const QString& fname, const QString& text)
+{
+  std::vector<hit::ErrorMessage> errors;
+  hit::Node* parsed = hit::parse(fname.toStdString(), text.toStdString(), &errors);
+
+  if (this->RootNode)
+  {
+    delete this->RootNode;
+  }
+  this->RootNode = parsed;
+
+  if (!errors.empty())
+  {
+    QString msg;
+    for (const auto& e : errors)
+    {
+      msg += QString::fromStdString(e.prefixed_message) + "\n";
+    }
+    QMessageBox::warning(this, tr("Parsed with warnings"), msg);
+  }
+}
+
 void MooseHitEditorPanel::resetToNewRoot()
 {
-  this->RootNode = std::make_shared<HitNode>();
+  this->setRootFromParsedText("new_input", "");
   this->CurrentFilePath.clear();
   this->rebuildTree();
   this->markDirty(false);
@@ -192,9 +232,6 @@ void MooseHitEditorPanel::onNewFile()
   this->resetToNewRoot();
 }
 
-// ---------------------------------------------------------------------------
-// File I/O
-// ---------------------------------------------------------------------------
 void MooseHitEditorPanel::onOpenFile()
 {
   if (this->Dirty)
@@ -218,19 +255,18 @@ void MooseHitEditorPanel::onOpenFile()
 
 void MooseHitEditorPanel::loadFile(const QString& filePath)
 {
-  std::string error;
-  auto root = HitParser::parseFile(filePath.toStdString(), error);
-  if (!root)
+  QFile file(filePath);
+  if (!file.open(QIODevice::ReadOnly | QIODevice::Text))
   {
-    QMessageBox::warning(this, tr("Failed to open file"), QString::fromStdString(error));
+    QMessageBox::warning(this, tr("Failed to open file"), tr("Could not open %1").arg(filePath));
     return;
   }
-  if (!error.empty())
-  {
-    QMessageBox::warning(this, tr("Parsed with warnings"), QString::fromStdString(error));
-  }
+  QTextStream in(&file);
+  QString text = in.readAll();
+  file.close();
 
-  this->RootNode = root;
+  this->setRootFromParsedText(filePath, text);
+
   this->CurrentFilePath = filePath;
   this->rebuildTree();
   this->markDirty(false);
@@ -266,7 +302,10 @@ void MooseHitEditorPanel::saveToPath(const QString& filePath)
   {
     return;
   }
-  std::string text = HitParser::serialize(this->RootNode);
+  // render() is hit's own serializer -- it applies MOOSE's real quoting/
+  // escaping rules and preserves comments/blank lines that were present
+  // in the originally-parsed input and not touched by this editor.
+  std::string text = this->RootNode->render();
 
   QFile file(filePath);
   if (!file.open(QIODevice::WriteOnly | QIODevice::Text))
@@ -286,9 +325,7 @@ void MooseHitEditorPanel::saveToPath(const QString& filePath)
 
 // ---------------------------------------------------------------------------
 // Run the solver, then load the Exodus result into the active ParaView
-// pipeline. This is the piece that ties the input-editing side of the
-// panel to ParaView's existing visualization machinery: once the .e file
-// exists, ParaView's own Exodus reader takes over.
+// pipeline.
 // ---------------------------------------------------------------------------
 void MooseHitEditorPanel::onRunSolve()
 {
@@ -335,8 +372,7 @@ void MooseHitEditorPanel::onRunSolve()
   }
 
   // MOOSE's default output naming is "<input-file-stem>_out.e".
-  QString resultPath =
-    inputInfo.absolutePath() + "/" + inputInfo.completeBaseName() + "_out.e";
+  QString resultPath = inputInfo.absolutePath() + "/" + inputInfo.completeBaseName() + "_out.e";
   if (!QFileInfo::exists(resultPath))
   {
     QMessageBox::information(this, tr("Solve finished"),
@@ -355,22 +391,8 @@ void MooseHitEditorPanel::onRunSolve()
 }
 
 // ---------------------------------------------------------------------------
-// Find and load the mesh referenced by the [Mesh] block, e.g.
-//   [Mesh]
-//     type = FileMesh
-//     file = my_mesh.e
-//   []
-// or the newer MeshGenerator-nested style:
-//   [Mesh]
-//     [fmg]
-//       type = FileMeshGenerator
-//       file = my_mesh.e
-//     []
-//   []
-// Either way this just searches for a `file = ...` parameter anywhere
-// under the top-level [Mesh] block. If more than one is present (e.g. a
-// chain of mesh generators that each reference a file), only the first
-// one found (depth-first) is used.
+// Find and load the mesh referenced by the [Mesh] block. See
+// findFileParamRecursive() above for what this does and doesn't handle.
 // ---------------------------------------------------------------------------
 QString MooseHitEditorPanel::findMeshFile() const
 {
@@ -378,12 +400,12 @@ QString MooseHitEditorPanel::findMeshFile() const
   {
     return QString();
   }
-  for (const auto& child : this->RootNode->children)
+  for (hit::Node* child : this->RootNode->children(hit::NodeType::Section))
   {
-    if (child->name == "Mesh")
+    if (child->path() == "Mesh")
     {
       std::string value;
-      if (findFileParamRecursive(child.get(), value))
+      if (findFileParamRecursive(child, value))
       {
         return QString::fromStdString(value);
       }
@@ -500,21 +522,21 @@ void MooseHitEditorPanel::onLoadSchema()
   }
 }
 
-QString MooseHitEditorPanel::topLevelBlockName(HitNode* node) const
+QString MooseHitEditorPanel::topLevelBlockName(hit::Node* node) const
 {
   if (!node)
   {
     return QString();
   }
-  while (node->parent && node->parent->parent)
+  while (node->parent() && node->parent()->parent())
   {
-    node = node->parent;
+    node = node->parent();
   }
-  return QString::fromStdString(node->name);
+  return QString::fromStdString(node->path());
 }
 
 // ---------------------------------------------------------------------------
-// Tree <-> HitNode model
+// Tree <-> hit::Node model
 // ---------------------------------------------------------------------------
 void MooseHitEditorPanel::rebuildTree()
 {
@@ -523,42 +545,42 @@ void MooseHitEditorPanel::rebuildTree()
   {
     return;
   }
-  for (const auto& child : this->RootNode->children)
+  for (hit::Node* child : this->RootNode->children(hit::NodeType::Section))
   {
     this->addTreeItemsRecursive(nullptr, child);
   }
   this->Tree->expandAll();
 }
 
-void MooseHitEditorPanel::addTreeItemsRecursive(QTreeWidgetItem* parentItem, const std::shared_ptr<HitNode>& node)
+void MooseHitEditorPanel::addTreeItemsRecursive(QTreeWidgetItem* parentItem, hit::Node* node)
 {
   QTreeWidgetItem* item = parentItem ? new QTreeWidgetItem(parentItem) : new QTreeWidgetItem(this->Tree);
-  item->setText(0, QString::fromStdString(node->name));
-  item->setData(0, Qt::UserRole, QVariant::fromValue(node.get()));
+  item->setText(0, QString::fromStdString(node->path()));
+  item->setData(0, Qt::UserRole, QVariant::fromValue(node));
 
-  for (const auto& child : node->children)
+  for (hit::Node* child : node->children(hit::NodeType::Section))
   {
     this->addTreeItemsRecursive(item, child);
   }
 }
 
-HitNode* MooseHitEditorPanel::nodeForItem(QTreeWidgetItem* item) const
+hit::Node* MooseHitEditorPanel::nodeForItem(QTreeWidgetItem* item) const
 {
   if (!item)
   {
     return nullptr;
   }
-  return item->data(0, Qt::UserRole).value<HitNode*>();
+  return item->data(0, Qt::UserRole).value<hit::Node*>();
 }
 
 void MooseHitEditorPanel::onTreeSelectionChanged()
 {
   QList<QTreeWidgetItem*> selected = this->Tree->selectedItems();
-  HitNode* node = selected.isEmpty() ? nullptr : this->nodeForItem(selected.first());
+  hit::Node* node = selected.isEmpty() ? nullptr : this->nodeForItem(selected.first());
   this->populateParamTableFor(node);
 }
 
-void MooseHitEditorPanel::populateParamTableFor(HitNode* node)
+void MooseHitEditorPanel::populateParamTableFor(hit::Node* node)
 {
   this->BlockTableSignals = true;
   this->ParamTable->setRowCount(0);
@@ -572,18 +594,23 @@ void MooseHitEditorPanel::populateParamTableFor(HitNode* node)
   const QString topBlock = this->topLevelBlockName(node);
   const QStringList typeChoices = this->Schema.typesForTopBlock(topBlock);
 
-  for (const auto& p : node->params)
+  for (hit::Node* fieldNode : node->children(hit::NodeType::Field))
   {
-    QString paramName = QString::fromStdString(p.name);
-    QString paramValue = QString::fromStdString(p.value);
+    QString paramName = QString::fromStdString(fieldNode->path());
+    QString paramValue = QString::fromStdString(fieldNode->strVal());
 
     int row = this->ParamTable->rowCount();
     this->ParamTable->insertRow(row);
 
     QTableWidgetItem* nameItem = new QTableWidgetItem(paramName);
+    // Tag the row with the actual Field node it represents, so edit
+    // handlers don't need to re-derive it from row index or tree
+    // selection (which can drift out of sync with table rows).
+    nameItem->setData(Qt::UserRole, QVariant::fromValue(fieldNode));
+
     MooseParamInfo info;
     QStringList options = (paramName == "type") ? typeChoices : QStringList();
-    if (this->Schema.paramInfo(p.name.c_str(), info))
+    if (this->Schema.paramInfo(paramName, info))
     {
       QString tip = info.description;
       if (!info.cppType.isEmpty())
@@ -621,18 +648,10 @@ void MooseHitEditorPanel::populateParamTableFor(HitNode* node)
         combo->addItem(paramValue);
         combo->setCurrentIndex(combo->count() - 1);
       }
-      // node/p captured by pointer+index: params vector is stable for the
-      // lifetime of this table (rows are rebuilt wholesale on any
-      // structural change), so capturing the row index by value is safe.
-      connect(combo, &QComboBox::currentTextChanged, this,
-        [this, node, row](const QString& text) {
-          if (row < 0 || row >= static_cast<int>(node->params.size()))
-          {
-            return;
-          }
-          node->params[row].value = text.toStdString();
-          this->markDirty(true);
-        });
+      connect(combo, &QComboBox::currentTextChanged, this, [this, fieldNode](const QString& text) {
+        static_cast<hit::Field*>(fieldNode)->setVal(text.toStdString());
+        this->markDirty(true);
+      });
       this->ParamTable->setCellWidget(row, ValueColumn, combo);
     }
     else
@@ -671,13 +690,13 @@ void MooseHitEditorPanel::onTreeContextMenu(const QPoint& pos)
 
 void MooseHitEditorPanel::onAddTopLevelBlock()
 {
-  // Always parents to the implicit root, regardless of whatever happens
-  // to be selected in the tree -- this is the one unambiguous way to add
-  // a new [BlockName] at the top level of the input file.
-  this->addBlockUnder(this->RootNode.get(), nullptr);
+  // Always parents to the root, regardless of whatever happens to be
+  // selected in the tree -- this is the one unambiguous way to add a new
+  // [BlockName] at the top level of the input file.
+  this->addBlockUnder(this->RootNode, nullptr);
 }
 
-void MooseHitEditorPanel::addBlockUnder(HitNode* parentNode, QTreeWidgetItem* parentItem)
+void MooseHitEditorPanel::addBlockUnder(hit::Node* parentNode, QTreeWidgetItem* parentItem)
 {
   if (!parentNode)
   {
@@ -690,10 +709,8 @@ void MooseHitEditorPanel::addBlockUnder(HitNode* parentNode, QTreeWidgetItem* pa
     return;
   }
 
-  auto child = std::make_shared<HitNode>();
-  child->name = name.trimmed().toStdString();
-  child->parent = parentNode;
-  parentNode->children.push_back(child);
+  hit::Node* child = new hit::Section(name.trimmed().toStdString());
+  parentNode->addChild(child);
 
   this->addTreeItemsRecursive(parentItem, child);
   if (parentItem)
@@ -711,24 +728,22 @@ void MooseHitEditorPanel::onRemoveBlock()
     return;
   }
   QTreeWidgetItem* item = selected.first();
-  HitNode* node = this->nodeForItem(item);
-  if (!node || !node->parent)
+  hit::Node* node = this->nodeForItem(item);
+  if (!node || !node->parent())
   {
     return;
   }
 
-  HitNode* parent = node->parent;
-  auto& siblings = parent->children;
-  siblings.erase(
-    std::remove_if(siblings.begin(), siblings.end(), [node](const std::shared_ptr<HitNode>& n) { return n.get() == node; }),
-    siblings.end());
-
+  // hit::Node's destructor unlinks itself from its parent's child list
+  // (verified against framework/contrib/hit/src/hit/parse.cc), so a plain
+  // delete is all that's needed -- no separate "detach" step.
+  delete node;
   delete item;
   this->markDirty(true);
 }
 
 // ---------------------------------------------------------------------------
-// Parameter table <-> HitNode params
+// Parameter table <-> hit::Field nodes
 // ---------------------------------------------------------------------------
 void MooseHitEditorPanel::onParamTableCellChanged(int row, int column)
 {
@@ -736,31 +751,29 @@ void MooseHitEditorPanel::onParamTableCellChanged(int row, int column)
   {
     return;
   }
-  QList<QTreeWidgetItem*> selected = this->Tree->selectedItems();
-  if (selected.isEmpty())
-  {
-    return;
-  }
-  HitNode* node = this->nodeForItem(selected.first());
-  if (!node || row < 0 || row >= static_cast<int>(node->params.size()))
-  {
-    return;
-  }
-
   QTableWidgetItem* nameItem = this->ParamTable->item(row, NameColumn);
   if (!nameItem)
   {
     return;
   }
-  node->params[row].name = nameItem->text().toStdString();
+  hit::Node* fieldNode = nameItem->data(Qt::UserRole).value<hit::Node*>();
+  if (!fieldNode)
+  {
+    return;
+  }
+
+  // setOverridePath renames the field (Field has no dedicated rename
+  // setter; this is hit's documented mechanism for it -- it makes every
+  // subsequent path()/render() call use the new name).
+  fieldNode->setOverridePath(nameItem->text().toStdString());
 
   // Rows whose value is a schema-backed dropdown have no QTableWidgetItem
-  // in the value column (it's a QComboBox instead); those update
-  // node->params[row].value themselves via the combo's connected lambda.
+  // in the value column (it's a QComboBox instead); those update the
+  // field's value themselves via the combo's connected lambda.
   QTableWidgetItem* valueItem = this->ParamTable->item(row, ValueColumn);
   if (valueItem)
   {
-    node->params[row].value = valueItem->text().toStdString();
+    static_cast<hit::Field*>(fieldNode)->setVal(valueItem->text().toStdString());
   }
   (void)column;
   this->markDirty(true);
@@ -774,31 +787,37 @@ void MooseHitEditorPanel::onAddParamRow()
     QMessageBox::information(this, tr("Select a block"), tr("Select a block in the tree first."));
     return;
   }
-  HitNode* node = this->nodeForItem(selected.first());
+  hit::Node* node = this->nodeForItem(selected.first());
   if (!node)
   {
     return;
   }
-  node->params.push_back({ "new_param", "value" });
+  hit::Node* field = new hit::Field("new_param", hit::Field::Kind::String, "value");
+  node->addChild(field);
   this->populateParamTableFor(node);
   this->markDirty(true);
 }
 
 void MooseHitEditorPanel::onRemoveParamRow()
 {
-  QList<QTreeWidgetItem*> selected = this->Tree->selectedItems();
   int row = this->ParamTable->currentRow();
-  if (selected.isEmpty() || row < 0)
+  if (row < 0)
   {
     return;
   }
-  HitNode* node = this->nodeForItem(selected.first());
-  if (!node || row >= static_cast<int>(node->params.size()))
+  QTableWidgetItem* nameItem = this->ParamTable->item(row, NameColumn);
+  if (!nameItem)
   {
     return;
   }
-  node->params.erase(node->params.begin() + row);
-  this->populateParamTableFor(node);
+  hit::Node* fieldNode = nameItem->data(Qt::UserRole).value<hit::Node*>();
+  if (!fieldNode)
+  {
+    return;
+  }
+  hit::Node* parentNode = fieldNode->parent();
+  delete fieldNode;
+  this->populateParamTableFor(parentNode);
   this->markDirty(true);
 }
 

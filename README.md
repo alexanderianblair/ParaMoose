@@ -17,8 +17,8 @@ ParaMoose/                    <- top level project
   CMakeLists.txt              <- find_package(ParaView) + plugin scan/build
   ParaMoose/                  <- the plugin itself (name matches its own dir)
     paraview.plugin           <- plugin descriptor, discovered by paraview_plugin_scan()
-    CMakeLists.txt             <- the plugin's own build file (paraview_add_plugin)
-    HitParser.h / HitParser.cxx
+    CMakeLists.txt             <- the plugin's own build file (paraview_add_plugin,
+                                  plus building/linking MOOSE's real hit parser)
     MooseSchema.h / MooseSchema.cxx
     MooseHitEditorPanel.h / MooseHitEditorPanel.cxx
 ```
@@ -32,23 +32,49 @@ to discover it and `paraview_plugin_build()` to build it. Calling
 (an earlier version of this example did exactly that) produces a
 `"<...>'s CMakeLists.txt may not add the <name> plugin"` configure error.
 
-- `HitParser.h` / `HitParser.cxx` - a small, self-contained parser and
-  serializer for the hit format (nested `[Block] ... []`, `key = value`,
-  quoted values, `#` comments).
 - `MooseSchema.h` / `MooseSchema.cxx` - loads MOOSE's `--json` syntax dump
   and exposes valid `type = ` values per top-level block plus
   description/options for individual parameters. See "Schema awareness"
   below.
 - `MooseHitEditorPanel.h` / `MooseHitEditorPanel.cxx` - the `QDockWidget`
-  subclass: toolbar (Open/Save/Save As/Run/Load Schema), a tree of blocks
-  on the left, a parameter table on the right.
+  subclass: toolbar (New/Open/Save/Save As/Run/View Mesh/Load Schema), a
+  tree of blocks on the left, a parameter table on the right. Operates
+  directly on `hit::Node` trees from MOOSE's own parser (see "The hit
+  parser" below) rather than a custom data model.
 - `ParaMoose/paraview.plugin` - the plugin descriptor (name/description)
   that `paraview_plugin_scan()` reads.
-- `ParaMoose/CMakeLists.txt` - the actual `paraview_add_plugin()` /
-  `paraview_plugin_add_dock_window()` calls, included only via the
-  top-level scan/build.
+- `ParaMoose/CMakeLists.txt` - `paraview_add_plugin()` /
+  `paraview_plugin_add_dock_window()`, plus compiling MOOSE's `hit` parser
+  sources and linking against WASP (see "The hit parser" below). Included
+  only via the top-level scan/build.
 - `CMakeLists.txt` (top level) - `find_package(ParaView)`, `BUILD_SHARED_LIBS`,
   and scan/build.
+
+## The hit parser
+
+This plugin links directly against MOOSE's own hit parser
+(`framework/contrib/hit` in your MOOSE checkout) rather than a hand-rolled
+one. Concretely, the panel now edits a real `hit::Node` tree (`hit::parse()`
+/ `hit::Section` / `hit::Field` / `node->render()`) instead of a custom
+struct, which gets you:
+
+- The actual MOOSE grammar - `!include`, multi-line/escaped strings, and
+  all the quoting rules, not an approximation of them.
+- `render()` is MOOSE's own serializer, so it applies MOOSE's real
+  quoting/escaping and preserves comments and blank lines that were
+  present in the parsed input and untouched by this editor - the older
+  hand-rolled serializer discarded all of that on every save.
+
+One caveat worth knowing: this editor's UI only ever surfaces `Section` and
+`Field` nodes (the tree shows sections, the table shows fields) - it has no
+way to view or add `Comment`/`Blank` nodes itself. So comments *survive* a
+load-edit-save round trip wherever you don't touch that part of the file,
+but you still can't see or author them through this UI.
+
+hit itself depends on **WASP**, a separate compiled library MOOSE builds
+alongside it - see "Building" below for what that means for the CMake
+invocation. This is a real dependency shift from the plugin's earlier
+versions, which had zero external dependencies beyond Qt/ParaView.
 
 ## Schema awareness
 
@@ -73,13 +99,12 @@ pick a valid one when it can.
 
 ## Known limitations (read before relying on this)
 
-1. **The HIT parser is simplified.** It does not implement the full hit
-   grammar - no `!include`, no multi-line strings, limited escaping, and it
-   doesn't preserve comments or original formatting on save. MOOSE itself
-   ships a real hit parsing library at `framework/contrib/hit` in the MOOSE
-   repository (with Python bindings too). For anything beyond a demo,
-   link against that instead of `HitParser.cxx` so anything MOOSE can parse,
-   you can parse identically.
+1. **`resetToNewRoot()`/"New" assumes `hit::parse(fname, "")` succeeds** and
+   returns a usable empty root. That's a reasonable assumption (empty input
+   is valid hit) but hasn't been verified against a live build in this
+   environment (no ParaView/MOOSE SDK available here) - if "New" misbehaves
+   in your build, open a minimal existing `.i` file as a workaround while
+   you look into it.
 2. **Schema awareness is best-effort, not validation.** The `--json`-backed
    dropdowns/tooltips (see "Schema awareness" above) help you pick valid
    values but don't stop you from typing something the schema doesn't know
@@ -98,21 +123,37 @@ pick a valid one when it can.
    in your own ParaView source tree for the exact macro signatures - older
    releases used `ADD_PARAVIEW_DOCK_WINDOW()` / `ADD_PARAVIEW_PLUGIN()`
    instead.
+5. **No comment/blank-line authoring in the UI**, even though they now
+   survive round-trips elsewhere in the file - see the caveat at the end of
+   "The hit parser" above.
 
 ## Building
 
 You need ParaView development headers - either build ParaView from source,
 or use a binary release that includes the plugin SDK.
 
+You also now need a MOOSE checkout with **WASP built** (WASP is hit's own
+dependency - the same one your MOOSE build already needed to compile `hit`
+for itself). If `<moose>/framework/contrib/wasp/install` doesn't exist yet,
+run `scripts/update_and_rebuild_wasp.sh` from your MOOSE checkout first.
+
 ```bash
 mkdir build && cd build
-cmake -DParaView_DIR=/path/to/paraview_build/lib/cmake/paraview-6.0 ..
+cmake .. \
+  -DParaView_DIR=/path/to/paraview_build/lib/cmake/paraview-6.0 \
+  -DMOOSE_DIR=/path/to/your/moose
 cmake --build . --config Release
 ```
 
 (Point `ParaView_DIR` at wherever your build/install placed
 `ParaViewConfig.cmake` - `lib/cmake/paraview-<version>` under your build or
-install prefix.)
+install prefix. `MOOSE_DIR` should be the checkout root, i.e. the directory
+containing `framework/`.)
+
+If WASP lives somewhere other than
+`<MOOSE_DIR>/framework/contrib/wasp/install` (some setups point it
+elsewhere via the `WASP_DIR` environment variable when building MOOSE
+itself), pass `-DWASP_DIR=/path/to/wasp/install` explicitly too.
 
 This produces `ParaMoose.so` (Linux/macOS) or
 `ParaMoose.dll` (Windows), typically under
