@@ -150,3 +150,44 @@ This produces `ParaMoose.so` (Linux/macOS) or
    the render view.
 6. Optionally click **Load App Schema...** (same executable) to enable the
    type/enum dropdowns and tooltips described in "Schema awareness" above.
+7. Click **View Mesh** to load the mesh referenced by the `[Mesh]` block
+   directly, without running a solve. See "Viewing the input mesh" below.
+
+## Viewing the input mesh
+
+**View Mesh** searches the `[Mesh]` block (and any sub-blocks, e.g. nested
+MeshGenerators) for a `file = ...` parameter, resolves it relative to the
+saved input file's location, and loads it with ParaView's own Exodus
+reader. This covers both:
+
+```
+[Mesh]
+  type = FileMesh
+  file = my_mesh.e
+[]
+```
+
+and the newer MeshGenerator-nested style:
+
+```
+[Mesh]
+  [fmg]
+    type = FileMeshGenerator
+    file = my_mesh.e
+  []
+[]
+```
+
+Notes/limitations:
+
+- The input file must be saved first (paths are resolved relative to it).
+- If `[Mesh]` has no `file` parameter at all - e.g. a generated mesh like
+  `type = GeneratedMesh` - there's nothing to find, since MOOSE builds that
+  mesh at runtime rather than reading it from disk. Use **Run + Load
+  Result** instead to see the mesh MOOSE actually produces.
+- If multiple `file` parameters exist (e.g. a chain of mesh generators
+  that each reference a file), only the first one found is used.
+- Only Exodus (`.e`/`.exo`) is wired up, via ParaView's own Exodus reader.
+  Other formats MOOSE can read (Gmsh `.msh`, Abaqus `.inp`, etc.) would
+  need the reader proxy picked based on file extension - not done here to
+  keep the example focused.

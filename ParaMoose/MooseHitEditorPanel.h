@@ -48,6 +48,7 @@ private slots:
   void onSaveFileAs();
   void onRunSolve();
   void onLoadSchema();
+  void onViewMesh();
 
   void onTreeSelectionChanged();
   void onTreeContextMenu(const QPoint& pos);
@@ -71,11 +72,14 @@ private:
   void markDirty(bool dirty);
   void updateWindowTitleForFile();
   QString topLevelBlockName(HitNode* node) const;
+  QString findMeshFile() const;
+  QString resolveInputRelativePath(const QString& maybeRelative) const;
 
   QTreeWidget* Tree = nullptr;
   QTableWidget* ParamTable = nullptr;
   QAction* SaveAction = nullptr;
   QAction* RunAction = nullptr;
+  QAction* ViewMeshAction = nullptr;
   QLineEdit* ExecutablePathEdit = nullptr;
   QLabel* SchemaStatusLabel = nullptr;
 

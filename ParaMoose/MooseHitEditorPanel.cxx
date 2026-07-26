@@ -39,6 +39,31 @@ namespace
 {
 const int NameColumn = 0;
 const int ValueColumn = 1;
+
+// Depth-first search for the first parameter literally named "file"
+// anywhere in node's subtree (its own params first, then children in
+// order). Covers both the classic `[Mesh] type = FileMesh file = ...`
+// style and newer MeshGenerator-nested styles, since either way the file
+// path shows up as a `file = ...` parameter somewhere under [Mesh].
+bool findFileParamRecursive(const HitNode* node, std::string& valueOut)
+{
+  for (const auto& p : node->params)
+  {
+    if (p.name == "file")
+    {
+      valueOut = p.value;
+      return true;
+    }
+  }
+  for (const auto& child : node->children)
+  {
+    if (findFileParamRecursive(child.get(), valueOut))
+    {
+      return true;
+    }
+  }
+  return false;
+}
 }
 
 MooseHitEditorPanel::MooseHitEditorPanel(const QString& title, QWidget* parentWidget)
@@ -70,6 +95,7 @@ void MooseHitEditorPanel::buildUi()
   QAction* saveAsAction = toolbar->addAction(tr("Save As..."));
   toolbar->addSeparator();
   this->RunAction = toolbar->addAction(tr("Run + Load Result"));
+  this->ViewMeshAction = toolbar->addAction(tr("View Mesh"));
   toolbar->addSeparator();
   QAction* loadSchemaAction = toolbar->addAction(tr("Load App Schema..."));
   this->RunAction->setEnabled(false);
@@ -79,6 +105,7 @@ void MooseHitEditorPanel::buildUi()
   connect(this->SaveAction, &QAction::triggered, this, &MooseHitEditorPanel::onSaveFile);
   connect(saveAsAction, &QAction::triggered, this, &MooseHitEditorPanel::onSaveFileAs);
   connect(this->RunAction, &QAction::triggered, this, &MooseHitEditorPanel::onRunSolve);
+  connect(this->ViewMeshAction, &QAction::triggered, this, &MooseHitEditorPanel::onViewMesh);
   connect(loadSchemaAction, &QAction::triggered, this, &MooseHitEditorPanel::onLoadSchema);
 
   mainLayout->addWidget(toolbar);
@@ -324,6 +351,105 @@ void MooseHitEditorPanel::onRunSolve()
   if (source)
   {
     source->updatePipeline();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Find and load the mesh referenced by the [Mesh] block, e.g.
+//   [Mesh]
+//     type = FileMesh
+//     file = my_mesh.e
+//   []
+// or the newer MeshGenerator-nested style:
+//   [Mesh]
+//     [fmg]
+//       type = FileMeshGenerator
+//       file = my_mesh.e
+//     []
+//   []
+// Either way this just searches for a `file = ...` parameter anywhere
+// under the top-level [Mesh] block. If more than one is present (e.g. a
+// chain of mesh generators that each reference a file), only the first
+// one found (depth-first) is used.
+// ---------------------------------------------------------------------------
+QString MooseHitEditorPanel::findMeshFile() const
+{
+  if (!this->RootNode)
+  {
+    return QString();
+  }
+  for (const auto& child : this->RootNode->children)
+  {
+    if (child->name == "Mesh")
+    {
+      std::string value;
+      if (findFileParamRecursive(child.get(), value))
+      {
+        return QString::fromStdString(value);
+      }
+      break;
+    }
+  }
+  return QString();
+}
+
+QString MooseHitEditorPanel::resolveInputRelativePath(const QString& maybeRelative) const
+{
+  QFileInfo fi(maybeRelative);
+  if (fi.isAbsolute())
+  {
+    return maybeRelative;
+  }
+  QFileInfo inputInfo(this->CurrentFilePath);
+  return inputInfo.absolutePath() + "/" + maybeRelative;
+}
+
+void MooseHitEditorPanel::onViewMesh()
+{
+  if (this->CurrentFilePath.isEmpty())
+  {
+    QMessageBox::information(this, tr("Save first"),
+      tr("Save the input file before viewing its mesh (the mesh file path is resolved relative to "
+         "the input file's location)."));
+    return;
+  }
+
+  QString meshFile = this->findMeshFile();
+  if (meshFile.isEmpty())
+  {
+    QMessageBox::information(this, tr("No mesh file found"),
+      tr("Could not find a `file = ...` parameter under the [Mesh] block or its sub-blocks. "
+         "This won't find anything for a generated mesh (e.g. GeneratedMesh) since there's no "
+         "file to load -- run the solve and use \"Run + Load Result\" instead to see the mesh "
+         "MOOSE actually produced."));
+    return;
+  }
+
+  QString resolved = this->resolveInputRelativePath(meshFile);
+  if (!QFileInfo::exists(resolved))
+  {
+    QMessageBox::warning(this, tr("Mesh file not found"),
+      tr("The [Mesh] block references '%1', which resolved to:\n%2\nbut that file does not exist.")
+        .arg(meshFile, resolved));
+    return;
+  }
+
+  pqObjectBuilder* builder = pqApplicationCore::instance()->getObjectBuilder();
+  pqServer* server = pqActiveObjects::instance().activeServer();
+  // MOOSE meshes are most commonly Exodus (.e/.exo), which is what this
+  // always uses. Other mesh formats MOOSE can read (Gmsh .msh, Abaqus
+  // .inp, etc.) would need the reader proxy picked based on file
+  // extension instead -- not done here to keep this example focused.
+  pqPipelineSource* source =
+    builder->createReader("sources", "ExodusIIReader", QStringList(resolved), server);
+  if (source)
+  {
+    source->updatePipeline();
+  }
+  else
+  {
+    QMessageBox::warning(
+      this, tr("Failed to load mesh"), tr("ParaView's Exodus reader could not open:\n%1").arg(resolved));
   }
 }
 
