@@ -1,0 +1,5 @@
+NAME
+  ParaMoose
+DESCRIPTION
+  Open, edit, and save MOOSE hit-format input files from within ParaView,
+  and run the associated MOOSE app to load its Exodus result.
