@@ -1,5 +1,12 @@
 cmake_minimum_required(VERSION 3.16)
 project(ParaMooseProject)
+
+# This is its own CMake project (separate from ParaView's own build), so it
+# gets its own default for BUILD_SHARED_LIBS -- which is OFF unless set
+# here. paraview_add_plugin() builds a plain add_library() under the hood,
+# so without this the plugin comes out as a static .a/.lib that ParaView
+# cannot load dynamically via Tools > Manage Plugins, even if ParaView
+# itself was built with shared libraries.
 set(BUILD_SHARED_LIBS ON CACHE BOOL "Build plugin as a shared library" FORCE)
 
 # You must point CMake at a ParaView build/install that includes development

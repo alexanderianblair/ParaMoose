@@ -10,6 +10,7 @@
 #include "pqServer.h"
 
 #include <QAction>
+#include <QComboBox>
 #include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
@@ -68,6 +69,8 @@ void MooseHitEditorPanel::buildUi()
   QAction* saveAsAction = toolbar->addAction(tr("Save As..."));
   toolbar->addSeparator();
   this->RunAction = toolbar->addAction(tr("Run + Load Result"));
+  toolbar->addSeparator();
+  QAction* loadSchemaAction = toolbar->addAction(tr("Load App Schema..."));
   this->SaveAction->setEnabled(false);
   this->RunAction->setEnabled(false);
 
@@ -75,10 +78,12 @@ void MooseHitEditorPanel::buildUi()
   connect(this->SaveAction, &QAction::triggered, this, &MooseHitEditorPanel::onSaveFile);
   connect(saveAsAction, &QAction::triggered, this, &MooseHitEditorPanel::onSaveFileAs);
   connect(this->RunAction, &QAction::triggered, this, &MooseHitEditorPanel::onRunSolve);
+  connect(loadSchemaAction, &QAction::triggered, this, &MooseHitEditorPanel::onLoadSchema);
 
   mainLayout->addWidget(toolbar);
 
-  // Path to the compiled MOOSE application executable used by "Run".
+  // Path to the compiled MOOSE application executable used by "Run" and
+  // by "Load App Schema..." (which runs `<exe> --json`).
   QWidget* execRow = new QWidget(container);
   QHBoxLayout* execLayout = new QHBoxLayout(execRow);
   execLayout->setContentsMargins(0, 0, 0, 0);
@@ -87,6 +92,10 @@ void MooseHitEditorPanel::buildUi()
   this->ExecutablePathEdit->setPlaceholderText(tr("/path/to/your-app-opt"));
   execLayout->addWidget(this->ExecutablePathEdit);
   mainLayout->addWidget(execRow);
+
+  this->SchemaStatusLabel = new QLabel(tr("Schema: not loaded (type dropdowns/tooltips unavailable)"), container);
+  this->SchemaStatusLabel->setStyleSheet("color: gray; font-style: italic;");
+  mainLayout->addWidget(this->SchemaStatusLabel);
 
   // --- Tree + parameter table -----------------------------------------
   QSplitter* splitter = new QSplitter(Qt::Horizontal, container);
@@ -294,6 +303,66 @@ void MooseHitEditorPanel::onRunSolve()
 }
 
 // ---------------------------------------------------------------------------
+// Schema awareness: run `<exe> --json` and parse MOOSE's syntax dump so the
+// parameter table can offer type dropdowns / enum dropdowns / tooltips.
+// ---------------------------------------------------------------------------
+void MooseHitEditorPanel::onLoadSchema()
+{
+  QString exe = this->ExecutablePathEdit->text().trimmed();
+  if (exe.isEmpty() || !QFileInfo::exists(exe))
+  {
+    QMessageBox::warning(
+      this, tr("No executable"), tr("Set a valid path to your MOOSE application executable first."));
+    return;
+  }
+
+  QProcess process;
+  process.setProgram(exe);
+  process.setArguments(QStringList() << "--json");
+  process.setProcessChannelMode(QProcess::MergedChannels);
+  process.start();
+  if (!process.waitForStarted())
+  {
+    QMessageBox::warning(this, tr("Failed to run"), tr("Could not start %1").arg(exe));
+    return;
+  }
+  process.waitForFinished(-1);
+
+  QString output = QString::fromUtf8(process.readAll());
+  QString error;
+  if (!this->Schema.loadFromAppOutput(output, error))
+  {
+    QMessageBox::warning(this, tr("Failed to parse schema"), error);
+    this->SchemaStatusLabel->setText(tr("Schema: failed to load (%1)").arg(error));
+    return;
+  }
+
+  this->SchemaStatusLabel->setText(tr("Schema: loaded from %1 --json").arg(QFileInfo(exe).fileName()));
+  this->SchemaStatusLabel->setStyleSheet("color: green;");
+
+  // Refresh the currently displayed block, if any, so dropdowns/tooltips
+  // appear immediately without needing to re-click the tree.
+  QList<QTreeWidgetItem*> selected = this->Tree->selectedItems();
+  if (!selected.isEmpty())
+  {
+    this->populateParamTableFor(this->nodeForItem(selected.first()));
+  }
+}
+
+QString MooseHitEditorPanel::topLevelBlockName(HitNode* node) const
+{
+  if (!node)
+  {
+    return QString();
+  }
+  while (node->parent && node->parent->parent)
+  {
+    node = node->parent;
+  }
+  return QString::fromStdString(node->name);
+}
+
+// ---------------------------------------------------------------------------
 // Tree <-> HitNode model
 // ---------------------------------------------------------------------------
 void MooseHitEditorPanel::rebuildTree()
@@ -335,19 +404,92 @@ void MooseHitEditorPanel::onTreeSelectionChanged()
 {
   QList<QTreeWidgetItem*> selected = this->Tree->selectedItems();
   HitNode* node = selected.isEmpty() ? nullptr : this->nodeForItem(selected.first());
+  this->populateParamTableFor(node);
+}
 
+void MooseHitEditorPanel::populateParamTableFor(HitNode* node)
+{
   this->BlockTableSignals = true;
   this->ParamTable->setRowCount(0);
-  if (node)
+
+  if (!node)
   {
-    for (const auto& p : node->params)
+    this->BlockTableSignals = false;
+    return;
+  }
+
+  const QString topBlock = this->topLevelBlockName(node);
+  const QStringList typeChoices = this->Schema.typesForTopBlock(topBlock);
+
+  for (const auto& p : node->params)
+  {
+    QString paramName = QString::fromStdString(p.name);
+    QString paramValue = QString::fromStdString(p.value);
+
+    int row = this->ParamTable->rowCount();
+    this->ParamTable->insertRow(row);
+
+    QTableWidgetItem* nameItem = new QTableWidgetItem(paramName);
+    MooseParamInfo info;
+    QStringList options = (paramName == "type") ? typeChoices : QStringList();
+    if (this->Schema.paramInfo(p.name.c_str(), info))
     {
-      int row = this->ParamTable->rowCount();
-      this->ParamTable->insertRow(row);
-      this->ParamTable->setItem(row, NameColumn, new QTableWidgetItem(QString::fromStdString(p.name)));
-      this->ParamTable->setItem(row, ValueColumn, new QTableWidgetItem(QString::fromStdString(p.value)));
+      QString tip = info.description;
+      if (!info.cppType.isEmpty())
+      {
+        tip += tip.isEmpty() ? QString() : "\n";
+        tip += tr("Type: %1").arg(info.cppType);
+      }
+      if (!tip.isEmpty())
+      {
+        nameItem->setToolTip(tip);
+      }
+      if (options.isEmpty() && !info.options.isEmpty())
+      {
+        options = info.options;
+      }
+    }
+    this->ParamTable->setItem(row, NameColumn, nameItem);
+
+    if (!options.isEmpty())
+    {
+      // Schema-backed dropdown: valid `type = ` values for this block, or
+      // a MooseEnum-style fixed set of options for this parameter.
+      // Editable so the user can still type a value the schema doesn't
+      // know about (e.g. a newer type than what --json reported).
+      QComboBox* combo = new QComboBox(this->ParamTable);
+      combo->setEditable(true);
+      combo->addItems(options);
+      int existingIndex = options.indexOf(paramValue);
+      if (existingIndex >= 0)
+      {
+        combo->setCurrentIndex(existingIndex);
+      }
+      else
+      {
+        combo->addItem(paramValue);
+        combo->setCurrentIndex(combo->count() - 1);
+      }
+      // node/p captured by pointer+index: params vector is stable for the
+      // lifetime of this table (rows are rebuilt wholesale on any
+      // structural change), so capturing the row index by value is safe.
+      connect(combo, &QComboBox::currentTextChanged, this,
+        [this, node, row](const QString& text) {
+          if (row < 0 || row >= static_cast<int>(node->params.size()))
+          {
+            return;
+          }
+          node->params[row].value = text.toStdString();
+          this->markDirty(true);
+        });
+      this->ParamTable->setCellWidget(row, ValueColumn, combo);
+    }
+    else
+    {
+      this->ParamTable->setItem(row, ValueColumn, new QTableWidgetItem(paramValue));
     }
   }
+
   this->BlockTableSignals = false;
 }
 
@@ -453,13 +595,20 @@ void MooseHitEditorPanel::onParamTableCellChanged(int row, int column)
   }
 
   QTableWidgetItem* nameItem = this->ParamTable->item(row, NameColumn);
-  QTableWidgetItem* valueItem = this->ParamTable->item(row, ValueColumn);
-  if (!nameItem || !valueItem)
+  if (!nameItem)
   {
     return;
   }
   node->params[row].name = nameItem->text().toStdString();
-  node->params[row].value = valueItem->text().toStdString();
+
+  // Rows whose value is a schema-backed dropdown have no QTableWidgetItem
+  // in the value column (it's a QComboBox instead); those update
+  // node->params[row].value themselves via the combo's connected lambda.
+  QTableWidgetItem* valueItem = this->ParamTable->item(row, ValueColumn);
+  if (valueItem)
+  {
+    node->params[row].value = valueItem->text().toStdString();
+  }
   (void)column;
   this->markDirty(true);
 }
@@ -478,14 +627,7 @@ void MooseHitEditorPanel::onAddParamRow()
     return;
   }
   node->params.push_back({ "new_param", "value" });
-
-  this->BlockTableSignals = true;
-  int row = this->ParamTable->rowCount();
-  this->ParamTable->insertRow(row);
-  this->ParamTable->setItem(row, NameColumn, new QTableWidgetItem("new_param"));
-  this->ParamTable->setItem(row, ValueColumn, new QTableWidgetItem("value"));
-  this->BlockTableSignals = false;
-
+  this->populateParamTableFor(node);
   this->markDirty(true);
 }
 
@@ -503,11 +645,7 @@ void MooseHitEditorPanel::onRemoveParamRow()
     return;
   }
   node->params.erase(node->params.begin() + row);
-
-  this->BlockTableSignals = true;
-  this->ParamTable->removeRow(row);
-  this->BlockTableSignals = false;
-
+  this->populateParamTableFor(node);
   this->markDirty(true);
 }
 

@@ -17,6 +17,8 @@ paraview_add_plugin(ParaMoose
     MooseHitEditorPanel.h
     HitParser.cxx
     HitParser.h
+    MooseSchema.cxx
+    MooseSchema.h
     ${dock_interface_sources}
 )
 

@@ -13,12 +13,13 @@ concrete skeleton to extend.
 ## Files
 
 ```
-moose-hit-editor-plugin/
-  CMakeLists.txt              <- top level: find_package(ParaView) + plugin scan/build
-  ParaMoose/
+ParaMoose/                    <- top level project
+  CMakeLists.txt              <- find_package(ParaView) + plugin scan/build
+  ParaMoose/                  <- the plugin itself (name matches its own dir)
     paraview.plugin           <- plugin descriptor, discovered by paraview_plugin_scan()
     CMakeLists.txt             <- the plugin's own build file (paraview_add_plugin)
     HitParser.h / HitParser.cxx
+    MooseSchema.h / MooseSchema.cxx
     MooseHitEditorPanel.h / MooseHitEditorPanel.cxx
 ```
 
@@ -34,15 +35,41 @@ to discover it and `paraview_plugin_build()` to build it. Calling
 - `HitParser.h` / `HitParser.cxx` - a small, self-contained parser and
   serializer for the hit format (nested `[Block] ... []`, `key = value`,
   quoted values, `#` comments).
+- `MooseSchema.h` / `MooseSchema.cxx` - loads MOOSE's `--json` syntax dump
+  and exposes valid `type = ` values per top-level block plus
+  description/options for individual parameters. See "Schema awareness"
+  below.
 - `MooseHitEditorPanel.h` / `MooseHitEditorPanel.cxx` - the `QDockWidget`
-  subclass: toolbar (Open/Save/Save As/Run), a tree of blocks on the left,
-  a parameter table on the right.
-- `ParaMoose/paraview.plugin` - the plugin descriptor
-  (name/description) that `paraview_plugin_scan()` reads.
-- `ParaMoose/CMakeLists.txt` - the actual `paraview_add_plugin()`
-  / `paraview_plugin_add_dock_window()` calls, included only via the
+  subclass: toolbar (Open/Save/Save As/Run/Load Schema), a tree of blocks
+  on the left, a parameter table on the right.
+- `ParaMoose/paraview.plugin` - the plugin descriptor (name/description)
+  that `paraview_plugin_scan()` reads.
+- `ParaMoose/CMakeLists.txt` - the actual `paraview_add_plugin()` /
+  `paraview_plugin_add_dock_window()` calls, included only via the
   top-level scan/build.
-- `CMakeLists.txt` (top level) - `find_package(ParaView)` + scan/build.
+- `CMakeLists.txt` (top level) - `find_package(ParaView)`, `BUILD_SHARED_LIBS`,
+  and scan/build.
+
+## Schema awareness
+
+Click **Load App Schema...** (after setting **App executable**) to run
+`<exe> --json` and parse the result. Once loaded:
+
+- Any parameter named `type` gets a dropdown of valid values scoped to the
+  top-level block it lives under (e.g. selecting a block under `[Kernels]`
+  and editing its `type` offers `Diffusion`, `TimeDerivative`, etc., pulled
+  from that app's actual registered kernels).
+- Any parameter the schema describes as a fixed set of options
+  (MooseEnum-style) also gets a dropdown instead of a free-text cell.
+- Parameter names get a tooltip with their description and C++ type, where
+  the schema has one.
+- All dropdowns stay editable, so you can still type a value the schema
+  doesn't know about.
+
+This is a best-effort reader, not a strict validator - see the caveat in
+`MooseSchema.h` about how it maps the JSON tree to block names. It doesn't
+stop you from typing an invalid block/parameter name; it only helps you
+pick a valid one when it can.
 
 ## Known limitations (read before relying on this)
 
@@ -53,14 +80,12 @@ to discover it and `paraview_plugin_build()` to build it. Calling
    repository (with Python bindings too). For anything beyond a demo,
    link against that instead of `HitParser.cxx` so anything MOOSE can parse,
    you can parse identically.
-2. **No schema validation.** This editor lets you type any block/parameter
-   name - it has no idea what parameters `[Kernels]` or a `Diffusion`
-   kernel actually accept. The natural next step (mentioned in-chat
-   earlier) is to also parse the `--json` syntax dump from your compiled
-   MOOSE app and use it to validate block/parameter names, populate
-   dropdowns for `MooseEnum` parameters, and show parameter docstrings as
-   tooltips. That's a separate chunk of work (JSON parsing + a schema
-   lookup keyed by block path) layered on top of this tree/table UI.
+2. **Schema awareness is best-effort, not validation.** The `--json`-backed
+   dropdowns/tooltips (see "Schema awareness" above) help you pick valid
+   values but don't stop you from typing something the schema doesn't know
+   about, and parameter docs/options are looked up by name globally rather
+   than strictly scoped to the exact block path - see the note at the top
+   of `MooseSchema.h`.
 3. **`onRunSolve()` runs synchronously** (`waitForFinished(-1)`), which
    blocks the ParaView UI thread for the duration of the solve. Fine for a
    quick demo; for real use, run the `QProcess` asynchronously and stream
@@ -117,21 +142,5 @@ This produces `ParaMoose.so` (Linux/macOS) or
    success loads `<stem>_out.e` into the active ParaView pipeline using
    ParaView's own Exodus reader, so you immediately see the mesh/fields in
    the render view.
-
-## Extending toward the "schema-aware" version
-
-The natural next iteration, per the architecture discussed earlier:
-
-- At startup (or on demand), run `your-app-opt --json` and parse the
-  resulting syntax tree.
-- Key that schema by block path (e.g. `Kernels/*/type` -> valid kernel
-  types) and use it to:
-  - populate a combo box instead of a free-text field for `type =`,
-  - show/hide parameters based on the selected `type`'s declared
-    parameters,
-  - render `MooseEnum` parameters as dropdowns and vector parameters as a
-    small repeated-field editor instead of a single text cell,
-  - show each parameter's docstring as a tooltip on hover.
-- This turns the generic tree/table editor here into something much closer
-  to Peacock's input-file tab, while still living inside ParaView and
-  reusing ParaView's own Exodus reading/rendering for the results side.
+6. Optionally click **Load App Schema...** (same executable) to enable the
+   type/enum dropdowns and tooltips described in "Schema awareness" above.

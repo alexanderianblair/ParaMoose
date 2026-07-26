@@ -14,6 +14,8 @@
 
 #pragma once
 
+#include "MooseSchema.h"
+
 #include <QDockWidget>
 
 #include <memory>
@@ -23,6 +25,7 @@ class QTreeWidgetItem;
 class QTableWidget;
 class QAction;
 class QLineEdit;
+class QLabel;
 struct HitNode;
 
 class MooseHitEditorPanel : public QDockWidget
@@ -43,6 +46,7 @@ private slots:
   void onSaveFile();
   void onSaveFileAs();
   void onRunSolve();
+  void onLoadSchema();
 
   void onTreeSelectionChanged();
   void onTreeContextMenu(const QPoint& pos);
@@ -59,20 +63,24 @@ private:
   void saveToPath(const QString& filePath);
   void rebuildTree();
   void addTreeItemsRecursive(QTreeWidgetItem* parentItem, const std::shared_ptr<HitNode>& node);
-  void populateParamTableFor(const std::shared_ptr<HitNode>& node);
+  void populateParamTableFor(HitNode* node);
   HitNode* nodeForItem(QTreeWidgetItem* item) const;
   void markDirty(bool dirty);
   void updateWindowTitleForFile();
+  QString topLevelBlockName(HitNode* node) const;
 
   QTreeWidget* Tree = nullptr;
   QTableWidget* ParamTable = nullptr;
   QAction* SaveAction = nullptr;
   QAction* RunAction = nullptr;
   QLineEdit* ExecutablePathEdit = nullptr;
+  QLabel* SchemaStatusLabel = nullptr;
 
   std::shared_ptr<HitNode> RootNode;
   QString CurrentFilePath;
   bool Dirty = false;
+
+  MooseSchema Schema;
 
   // Guards against onParamTableCellChanged reacting to programmatic
   // updates (e.g. while repopulating the table after a tree selection
