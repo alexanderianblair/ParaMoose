@@ -28,6 +28,8 @@ class QLineEdit;
 class QLabel;
 class QProcess;
 class pqOutputWidget;
+class pqPipelineSource;
+class pqDataRepresentation;
 
 namespace hit
 {
@@ -62,6 +64,7 @@ private slots:
   void onRemoveBlock();
 
   void onParamTableCellChanged(int row, int column);
+  void onParamTableCurrentCellChanged(int currentRow, int currentColumn, int previousRow, int previousColumn);
   void onAddParamRow();
   void onRemoveParamRow();
 
@@ -81,6 +84,9 @@ private:
   QString topLevelBlockName(hit::Node* node) const;
   QString findMeshFile() const;
   QString resolveInputRelativePath(const QString& maybeRelative) const;
+  void ensureHighlightSource(const QString& meshFilePath);
+  void updateHighlight(hit::Node* fieldNode, const QString& paramName);
+  void clearHighlight();
 
   QTreeWidget* Tree = nullptr;
   QTableWidget* ParamTable = nullptr;
@@ -106,6 +112,21 @@ private:
   bool Dirty = false;
 
   MooseSchema Schema;
+
+  // File path of whatever mesh/result was most recently loaded via
+  // onViewMesh()/onRunSolve(), used as the source file for the highlight
+  // reader below. Empty if nothing has been loaded yet this session.
+  QString LastLoadedMeshFilePath;
+
+  // A second, independent Exodus reader + representation pointed at the
+  // same file as LastLoadedMeshFilePath, used purely to highlight a
+  // boundary/block by name -- kept separate from whatever the person is
+  // actually looking at so toggling a highlight never disturbs their main
+  // view's array selection or coloring. Hidden (setVisible(false)) except
+  // while a boundary/block parameter row is the current table selection.
+  pqPipelineSource* HighlightSource = nullptr;
+  pqDataRepresentation* HighlightRepresentation = nullptr;
+  QString HighlightSourceFilePath;
 
   // Guards against onParamTableCellChanged reacting to programmatic
   // updates (e.g. while repopulating the table after a tree selection

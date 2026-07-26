@@ -76,6 +76,7 @@ target_link_libraries(ParaMoose
   PRIVATE
     ParaView::pqApplicationComponents
     ParaView::pqCore
+    ParaView::RemotingViews
     hit
 )
 

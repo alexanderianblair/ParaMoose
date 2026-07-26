@@ -97,6 +97,53 @@ This is a best-effort reader, not a strict validator - see the caveat in
 stop you from typing an invalid block/parameter name; it only helps you
 pick a valid one when it can.
 
+## Highlighting boundaries/blocks
+
+Click a `boundary` or `block` parameter row in the table (just select it,
+no need to edit it) and the mesh region(s) it names highlight in solid red
+in the active render view, overlaid on whatever you're currently looking
+at. Selecting any other row, or nothing, clears the highlight.
+
+This works by spinning up a second, independent Exodus reader pointed at
+whichever file you last loaded via **View Mesh** or **Run + Load Result**
+(tracked separately from your main view so highlighting never disturbs its
+array selection or coloring), and setting that reader's own
+`SideSetArrayStatus`/`NodeSetArrayStatus`/`ElementBlocks` properties to
+show only the name(s) in the selected parameter's value - the same
+properties you'd toggle by hand in the reader's Properties panel to show
+just one sideset. `boundary` tries both sideset and nodeset names (MOOSE
+uses the same parameter name for both surface and nodal BCs); `block`
+always means element blocks.
+
+One implementation note worth knowing if you're reading the code: these
+properties are NOT a flat list of "enabled" names at the raw
+`vtkSMStringVectorProperty` level, even though `paraview.simple` presents
+them to Python that way (confirmed against ParaView's own property XML --
+`number_of_elements_per_command="2" repeat_command="1"` means the real
+element list is interleaved `(name, "0"/"1")` pairs, covering *every*
+array the domain knows about, not just the ones being turned on). An
+earlier version of this feature wrote a flat "enabled names only" list,
+which the domain silently fell back from to its default (everything
+enabled) -- the visible symptom was the entire mesh highlighting instead
+of just the named region. `setArraySelectionProperty()` in
+`MooseHitEditorPanel.cxx` builds the full pair list correctly by
+enumerating the property's domain first.
+
+Notes/limitations:
+
+- Nothing to highlight against until you've loaded a mesh or result at
+  least once via **View Mesh** / **Run + Load Result** in the current
+  session.
+- If a name in the parameter's value doesn't match anything in the
+  loaded mesh (typo, or the mesh doesn't actually match this input file),
+  nothing shows for that name - no error, it just silently matches
+  nothing, same as manually typing a bad name into the reader's Properties
+  panel would.
+- The highlight reader is recreated (not reused) whenever the file it
+  should point at changes; it isn't torn down when the panel closes, left
+  for ParaView's own session cleanup, consistent with how the main
+  mesh/result sources are already handled elsewhere in this plugin.
+
 ## Known limitations (read before relying on this)
 
 1. **`resetToNewRoot()`/"New" assumes `hit::parse(fname, "")` succeeds** and
@@ -203,6 +250,9 @@ that's what you're working with.
    type/enum dropdowns and tooltips described in "Schema awareness" above.
 7. Click **View Mesh** to load the mesh referenced by the `[Mesh]` block
    directly, without running a solve. See "Viewing the input mesh" below.
+8. Click any `boundary` or `block` parameter row to highlight the region
+   it names in the render view. See "Highlighting boundaries/blocks"
+   below.
 
 ## Viewing the input mesh
 

@@ -9,10 +9,19 @@
 // ParaView / pqCore
 #include "pqActiveObjects.h"
 #include "pqApplicationCore.h"
+#include "pqDataRepresentation.h"
 #include "pqObjectBuilder.h"
 #include "pqOutputWidget.h"
 #include "pqPipelineSource.h"
 #include "pqServer.h"
+#include "pqView.h"
+
+#include "vtkSMArraySelectionDomain.h"
+#include "vtkSMPVRepresentationProxy.h"
+#include "vtkSMProperty.h"
+#include "vtkSMPropertyHelper.h"
+#include "vtkSMProxy.h"
+#include "vtkSMSourceProxy.h"
 
 #include <QAction>
 #include <QComboBox>
@@ -41,6 +50,8 @@
 #include <QWidget>
 
 #include <algorithm>
+#include <string>
+#include <vector>
 
 // Lets QVariant carry raw hit::Node pointers (used to tag tree items and
 // parameter-table rows with the tree node they represent). Only used
@@ -52,6 +63,45 @@ namespace
 {
 const int NameColumn = 0;
 const int ValueColumn = 1;
+
+// Exodus array-selection properties (ElementBlocks, SideSetArrayStatus,
+// NodeSetArrayStatus) are NOT a flat list of "enabled" names at the raw
+// vtkSMStringVectorProperty level, despite paraview.simple presenting them
+// to Python that way. Confirmed against ParaView's own property XML:
+//   <StringVectorProperty command="SetSideSetArrayStatus" element_types="2 0"
+//     number_of_elements_per_command="2" repeat_command="1" ...>
+// number_of_elements_per_command="2" + repeat_command="1" means the real
+// element list is interleaved (name, "0"/"1") pairs for every array the
+// domain knows about -- not just the ones you want on. Writing only the
+// "on" names (an earlier version of this code did exactly that) leaves
+// the property in a malformed state that the domain apparently falls back
+// from to its default (everything enabled), which is why the whole mesh
+// showed up instead of just the named boundary/block.
+void setArraySelectionProperty(
+  vtkSMSourceProxy* proxy, const char* propertyName, const std::vector<std::string>& wantedNames)
+{
+  vtkSMProperty* prop = proxy->GetProperty(propertyName);
+  if (!prop)
+  {
+    return;
+  }
+  vtkSMArraySelectionDomain* domain = vtkSMArraySelectionDomain::SafeDownCast(prop->GetDomain("array_list"));
+  if (!domain)
+  {
+    return;
+  }
+
+  unsigned int n = domain->GetNumberOfStrings();
+  vtkSMPropertyHelper helper(proxy, propertyName);
+  helper.SetNumberOfElements(n * 2);
+  for (unsigned int i = 0; i < n; ++i)
+  {
+    std::string name = domain->GetString(i);
+    bool wanted = std::find(wantedNames.begin(), wantedNames.end(), name) != wantedNames.end();
+    helper.Set(2 * i, name.c_str());
+    helper.Set(2 * i + 1, wanted ? "1" : "0");
+  }
+}
 
 // Depth-first search for the first Field literally named "file" anywhere
 // in node's subtree (its own fields first, then child sections in order).
@@ -169,6 +219,8 @@ void MooseHitEditorPanel::buildUi()
   this->ParamTable->setHorizontalHeaderLabels(QStringList() << tr("Parameter") << tr("Value"));
   this->ParamTable->horizontalHeader()->setStretchLastSection(true);
   connect(this->ParamTable, &QTableWidget::cellChanged, this, &MooseHitEditorPanel::onParamTableCellChanged);
+  connect(this->ParamTable, &QTableWidget::currentCellChanged, this,
+    &MooseHitEditorPanel::onParamTableCurrentCellChanged);
   rightLayout->addWidget(this->ParamTable);
 
   QWidget* paramButtonRow = new QWidget(rightPane);
@@ -440,6 +492,7 @@ void MooseHitEditorPanel::onRunSolve()
         if (source)
         {
           source->updatePipeline();
+          this->LastLoadedMeshFilePath = resultPath;
         }
       }
 
@@ -530,6 +583,7 @@ void MooseHitEditorPanel::onViewMesh()
   if (source)
   {
     source->updatePipeline();
+    this->LastLoadedMeshFilePath = resolved;
   }
   else
   {
@@ -840,6 +894,169 @@ void MooseHitEditorPanel::onParamTableCellChanged(int row, int column)
   }
   (void)column;
   this->markDirty(true);
+}
+
+// ---------------------------------------------------------------------------
+// Highlighting: when the current table row is a "boundary" or "block"
+// parameter, show the mesh region(s) it names as a colored overlay in the
+// render view. See the class-level comment on HighlightSource for the
+// overall approach (a second, hidden reader + representation, kept
+// separate from whatever the person is actually looking at).
+// ---------------------------------------------------------------------------
+void MooseHitEditorPanel::onParamTableCurrentCellChanged(int currentRow, int, int, int)
+{
+  if (currentRow < 0)
+  {
+    this->clearHighlight();
+    return;
+  }
+  QTableWidgetItem* nameItem = this->ParamTable->item(currentRow, NameColumn);
+  if (!nameItem)
+  {
+    this->clearHighlight();
+    return;
+  }
+  hit::Node* fieldNode = nameItem->data(Qt::UserRole).value<hit::Node*>();
+  QString paramName = nameItem->text();
+  if (!fieldNode || (paramName != "boundary" && paramName != "block"))
+  {
+    this->clearHighlight();
+    return;
+  }
+  this->updateHighlight(fieldNode, paramName);
+}
+
+void MooseHitEditorPanel::ensureHighlightSource(const QString& meshFilePath)
+{
+  if (this->HighlightSource && this->HighlightSourceFilePath == meshFilePath)
+  {
+    return;
+  }
+
+  pqObjectBuilder* builder = pqApplicationCore::instance()->getObjectBuilder();
+  if (this->HighlightSource)
+  {
+    builder->destroy(this->HighlightSource);
+    this->HighlightSource = nullptr;
+    this->HighlightRepresentation = nullptr;
+  }
+
+  pqServer* server = pqActiveObjects::instance().activeServer();
+  pqView* view = pqActiveObjects::instance().activeView();
+  this->HighlightSource =
+    builder->createReader("sources", "ExodusIIReader", QStringList(meshFilePath), server);
+  if (!this->HighlightSource)
+  {
+    return;
+  }
+  this->HighlightSourceFilePath = meshFilePath;
+
+  // Domains for the array-selection properties below (i.e. the list of
+  // sideset/nodeset/element-block names actually available) aren't
+  // populated until the reader has read the file's metadata at least
+  // once -- do that before touching those properties.
+  this->HighlightSource->updatePipeline();
+
+  // Start with everything hidden from this second reader's own output --
+  // updateHighlight() below turns on just the specific sideset/nodeset/
+  // element-block names for whatever's currently selected.
+  vtkSMSourceProxy* proxy = vtkSMSourceProxy::SafeDownCast(this->HighlightSource->getProxy());
+  if (proxy)
+  {
+    setArraySelectionProperty(proxy, "ElementBlocks", {});
+    setArraySelectionProperty(proxy, "SideSetArrayStatus", {});
+    setArraySelectionProperty(proxy, "NodeSetArrayStatus", {});
+    proxy->UpdateVTKObjects();
+  }
+
+  this->HighlightRepresentation = builder->createDataRepresentation(this->HighlightSource->getOutputPort(0), view);
+  if (this->HighlightRepresentation)
+  {
+    vtkSMProxy* reprProxy = this->HighlightRepresentation->getProxy();
+    // Solid red, not mapped from any data array. SetScalarColoring is an
+    // instance method on vtkSMPVRepresentationProxy (not static, despite
+    // looking like a natural fit for one) -- confirmed against ParaView's
+    // own header before using it, since guessing wrong here would have
+    // silently left the highlight scalar-colored instead of solid.
+    // arrayName == nullptr turns coloring off per that header's own doc
+    // comment; the attribute-type argument is a vtkDataObject::AttributeTypes
+    // value and is irrelevant once arrayName is null, so 0 (POINT) is fine.
+    static const double kHighlightColor[3] = { 1.0, 0.0, 0.0 };
+    if (vtkSMPVRepresentationProxy* pvRepr = vtkSMPVRepresentationProxy::SafeDownCast(reprProxy))
+    {
+      pvRepr->SetScalarColoring(nullptr, 0);
+    }
+    vtkSMPropertyHelper(reprProxy, "DiffuseColor").Set(kHighlightColor, 3);
+    vtkSMPropertyHelper(reprProxy, "AmbientColor").Set(kHighlightColor, 3);
+    reprProxy->UpdateVTKObjects();
+    this->HighlightRepresentation->setVisible(false);
+  }
+}
+
+void MooseHitEditorPanel::updateHighlight(hit::Node* fieldNode, const QString& paramName)
+{
+  if (this->LastLoadedMeshFilePath.isEmpty())
+  {
+    // Nothing loaded yet (no "View Mesh" / "Run + Load Result" this
+    // session) -- nothing to highlight against.
+    return;
+  }
+  this->ensureHighlightSource(this->LastLoadedMeshFilePath);
+  if (!this->HighlightSource || !this->HighlightRepresentation)
+  {
+    return;
+  }
+
+  QString value = QString::fromStdString(static_cast<hit::Field*>(fieldNode)->strVal());
+  QStringList tokens = value.split(' ', Qt::SkipEmptyParts);
+  std::vector<std::string> names;
+  for (const QString& t : tokens)
+  {
+    names.push_back(t.toStdString());
+  }
+
+  vtkSMSourceProxy* proxy = vtkSMSourceProxy::SafeDownCast(this->HighlightSource->getProxy());
+  if (!proxy)
+  {
+    return;
+  }
+
+  // "boundary" in MOOSE can name either a sideset or a nodeset (surface vs
+  // nodal BCs both use the same parameter name), so try both -- whichever
+  // doesn't match anything in this mesh simply shows nothing extra.
+  // "block" always means element blocks.
+  if (paramName == "boundary")
+  {
+    setArraySelectionProperty(proxy, "SideSetArrayStatus", names);
+    setArraySelectionProperty(proxy, "NodeSetArrayStatus", names);
+    setArraySelectionProperty(proxy, "ElementBlocks", {});
+  }
+  else
+  {
+    setArraySelectionProperty(proxy, "ElementBlocks", names);
+    setArraySelectionProperty(proxy, "SideSetArrayStatus", {});
+    setArraySelectionProperty(proxy, "NodeSetArrayStatus", {});
+  }
+  proxy->UpdateVTKObjects();
+  this->HighlightSource->updatePipeline();
+  this->HighlightRepresentation->setVisible(true);
+
+  if (pqView* view = pqActiveObjects::instance().activeView())
+  {
+    view->render();
+  }
+}
+
+void MooseHitEditorPanel::clearHighlight()
+{
+  if (this->HighlightRepresentation && this->HighlightRepresentation->isVisible())
+  {
+    this->HighlightRepresentation->setVisible(false);
+    if (pqView* view = pqActiveObjects::instance().activeView())
+    {
+      view->render();
+    }
+  }
 }
 
 void MooseHitEditorPanel::onAddParamRow()
