@@ -33,6 +33,7 @@
 #include <QInputDialog>
 #include <QLabel>
 #include <QLineEdit>
+#include <QMap>
 #include <QMenu>
 #include <QMessageBox>
 #include <QMetaType>
@@ -101,6 +102,40 @@ void setArraySelectionProperty(
     helper.Set(2 * i, name.c_str());
     helper.Set(2 * i + 1, wanted ? "1" : "0");
   }
+}
+
+// Maps a mesh file's extension to the ParaView reader proxy that can open
+// it. Deliberately conservative: only extensions backed by a proxy name
+// confirmed against ParaView's own documentation/source are included here
+// (Exodus family, legacy VTK, VTK XML unstructured grid). MOOSE/libMesh
+// can also read several other formats (Gmsh .msh, Abaqus .inp, ANSYS .cdb,
+// Nastran, etc.) that aren't wired up -- guessing at proxy names for those
+// risks a confusing runtime failure instead of the clear "unsupported"
+// message this returns for them.
+QString readerProxyNameForExtension(const QString& filePath)
+{
+  QString ext = QFileInfo(filePath).suffix().toLower();
+  static const QMap<QString, QString> kExtensionToProxy = {
+    { "e", "ExodusIIReader" },
+    { "exo", "ExodusIIReader" },
+    { "ex2", "ExodusIIReader" },
+    { "exii", "ExodusIIReader" },
+    { "gen", "ExodusIIReader" }, // Exodus/Genesis, same reader
+    { "g", "ExodusIIReader" },
+    { "nem", "ExodusIIReader" }, // Nemesis (parallel Exodus), same reader
+    { "vtk", "LegacyVTKFileReader" },
+    { "vtu", "XMLUnstructuredGridReader" },
+  };
+  return kExtensionToProxy.value(ext);
+}
+
+// Only Exodus-family files carry the named element-block/sideset/nodeset
+// structure the highlighting feature (see setArraySelectionProperty()
+// below) depends on -- legacy VTK / VTK XML files have no equivalent
+// concept at the reader level.
+bool isExodusFamilyExtension(const QString& filePath)
+{
+  return readerProxyNameForExtension(filePath) == "ExodusIIReader";
 }
 
 // Depth-first search for the first Field literally named "file" anywhere
@@ -572,14 +607,22 @@ void MooseHitEditorPanel::onViewMesh()
     return;
   }
 
+  QString readerProxyName = readerProxyNameForExtension(resolved);
+  if (readerProxyName.isEmpty())
+  {
+    QMessageBox::warning(this, tr("Unsupported mesh format"),
+      tr("Don't know how to open '%1' -- only Exodus (.e/.exo/.ex2/.gen/.g/.nem), legacy VTK "
+         "(.vtk), and VTK XML unstructured grid (.vtu) are wired up. MOOSE/libMesh can read "
+         "several other formats (Gmsh, Abaqus, ANSYS, Nastran, ...) that this plugin doesn't "
+         "have a reader mapping for yet.")
+        .arg(QFileInfo(resolved).fileName()));
+    return;
+  }
+
   pqObjectBuilder* builder = pqApplicationCore::instance()->getObjectBuilder();
   pqServer* server = pqActiveObjects::instance().activeServer();
-  // MOOSE meshes are most commonly Exodus (.e/.exo), which is what this
-  // always uses. Other mesh formats MOOSE can read (Gmsh .msh, Abaqus
-  // .inp, etc.) would need the reader proxy picked based on file
-  // extension instead -- not done here to keep this example focused.
   pqPipelineSource* source =
-    builder->createReader("sources", "ExodusIIReader", QStringList(resolved), server);
+    builder->createReader("sources", readerProxyName, QStringList(resolved), server);
   if (source)
   {
     source->updatePipeline();
@@ -939,6 +982,15 @@ void MooseHitEditorPanel::ensureHighlightSource(const QString& meshFilePath)
     builder->destroy(this->HighlightSource);
     this->HighlightSource = nullptr;
     this->HighlightRepresentation = nullptr;
+  }
+
+  if (!isExodusFamilyExtension(meshFilePath))
+  {
+    // Highlighting depends on Exodus's named sideset/nodeset/element-block
+    // structure via SideSetArrayStatus etc.; legacy VTK / VTK XML files
+    // have no equivalent, so there's nothing useful to build here. Leave
+    // HighlightSource null -- updateHighlight() already no-ops on that.
+    return;
   }
 
   pqServer* server = pqActiveObjects::instance().activeServer();

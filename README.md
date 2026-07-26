@@ -258,8 +258,27 @@ that's what you're working with.
 
 **View Mesh** searches the `[Mesh]` block (and any sub-blocks, e.g. nested
 MeshGenerators) for a `file = ...` parameter, resolves it relative to the
-saved input file's location, and loads it with ParaView's own Exodus
-reader. This covers both:
+saved input file's location, and loads it with the ParaView reader that
+matches its extension:
+
+| Extension | Reader |
+|---|---|
+| `.e`, `.exo`, `.ex2`, `.exii`, `.gen`, `.g`, `.nem` | `ExodusIIReader` |
+| `.vtk` | `LegacyVTKFileReader` |
+| `.vtu` | `XMLUnstructuredGridReader` |
+
+Anything else gets a clear "unsupported format" message rather than a
+confusing failure from guessing the wrong reader. MOOSE/libMesh can read
+several other formats (Gmsh `.msh`, Abaqus `.inp`, ANSYS `.cdb`, Nastran,
+...) that aren't in this table - each of those was left out deliberately
+rather than guessed at, since getting a ParaView reader proxy name wrong
+produces a worse failure mode (a confusing runtime error) than just saying
+"not supported yet." Extending the table in `readerProxyNameForExtension()`
+is straightforward once you've confirmed the right proxy name for a given
+format, e.g. via `paraview.simple` docs or a quick Open File dialog test in
+the ParaView GUI itself.
+
+This covers both the classic style:
 
 ```
 [Mesh]
@@ -288,7 +307,8 @@ Notes/limitations:
   Result** instead to see the mesh MOOSE actually produces.
 - If multiple `file` parameters exist (e.g. a chain of mesh generators
   that each reference a file), only the first one found is used.
-- Only Exodus (`.e`/`.exo`) is wired up, via ParaView's own Exodus reader.
-  Other formats MOOSE can read (Gmsh `.msh`, Abaqus `.inp`, etc.) would
-  need the reader proxy picked based on file extension - not done here to
-  keep the example focused.
+- **Highlighting (see below) only works for Exodus-family files.** Legacy
+  VTK/VTK XML files have no equivalent to Exodus's named sideset/nodeset/
+  element-block structure, so there's nothing for the highlight feature to
+  key off of for those formats - selecting a `boundary`/`block` row simply
+  won't show anything if the loaded mesh isn't Exodus-family.
