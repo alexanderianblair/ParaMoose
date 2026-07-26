@@ -130,10 +130,16 @@ This produces `ParaMoose.so` (Linux/macOS) or
 
 ## Using it
 
-1. Click **Open...**, pick a `.i` file. The block tree populates on the
-   left.
-2. Click a block in the tree to see/edit its parameters in the table on the
-   right. Right-click the tree for **Add Child Block** / **Remove Block**.
+1. Click **Open...**, pick a `.i` file, or click **New** to start from a
+   blank input (the panel actually starts with a blank one already, so you
+   can begin adding blocks immediately without opening or saving anything
+   first).
+2. Right-click empty space in the tree for **Add Top-Level Block** — this
+   always adds a new `[BlockName]` at the top level, regardless of what's
+   currently selected. Right-click an existing block for **Add Child
+   Block** (adds under that block) or **Remove Block**.
+3. Click a block in the tree to see/edit its parameters in the table on the
+   right.
 3. Use **Add Parameter** / **Remove Selected** under the table to edit
    parameters for the selected block.
 4. **Save** / **Save As...** writes the tree back out in hit format.

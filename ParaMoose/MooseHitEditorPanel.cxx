@@ -64,6 +64,7 @@ void MooseHitEditorPanel::buildUi()
 
   // --- Toolbar -------------------------------------------------------
   QToolBar* toolbar = new QToolBar(container);
+  QAction* newAction = toolbar->addAction(tr("New"));
   QAction* openAction = toolbar->addAction(tr("Open..."));
   this->SaveAction = toolbar->addAction(tr("Save"));
   QAction* saveAsAction = toolbar->addAction(tr("Save As..."));
@@ -71,9 +72,9 @@ void MooseHitEditorPanel::buildUi()
   this->RunAction = toolbar->addAction(tr("Run + Load Result"));
   toolbar->addSeparator();
   QAction* loadSchemaAction = toolbar->addAction(tr("Load App Schema..."));
-  this->SaveAction->setEnabled(false);
   this->RunAction->setEnabled(false);
 
+  connect(newAction, &QAction::triggered, this, &MooseHitEditorPanel::onNewFile);
   connect(openAction, &QAction::triggered, this, &MooseHitEditorPanel::onOpenFile);
   connect(this->SaveAction, &QAction::triggered, this, &MooseHitEditorPanel::onSaveFile);
   connect(saveAsAction, &QAction::triggered, this, &MooseHitEditorPanel::onSaveFileAs);
@@ -137,7 +138,31 @@ void MooseHitEditorPanel::buildUi()
   mainLayout->addWidget(splitter, 1);
 
   this->setWidget(container);
-  this->updateWindowTitleForFile();
+  this->resetToNewRoot();
+}
+
+void MooseHitEditorPanel::resetToNewRoot()
+{
+  this->RootNode = std::make_shared<HitNode>();
+  this->CurrentFilePath.clear();
+  this->rebuildTree();
+  this->markDirty(false);
+  this->SaveAction->setEnabled(true);
+  this->RunAction->setEnabled(false);
+}
+
+void MooseHitEditorPanel::onNewFile()
+{
+  if (this->Dirty)
+  {
+    auto reply = QMessageBox::question(
+      this, tr("Discard changes?"), tr("The current input has unsaved changes. Start a new one anyway?"));
+    if (reply != QMessageBox::Yes)
+    {
+      return;
+    }
+  }
+  this->resetToNewRoot();
 }
 
 // ---------------------------------------------------------------------------
@@ -495,25 +520,40 @@ void MooseHitEditorPanel::populateParamTableFor(HitNode* node)
 
 void MooseHitEditorPanel::onTreeContextMenu(const QPoint& pos)
 {
+  QTreeWidgetItem* itemAtPos = this->Tree->itemAt(pos);
+
   QMenu menu(this);
-  QAction* addAction = menu.addAction(tr("Add Child Block"));
-  QAction* removeAction = menu.addAction(tr("Remove Block"));
-  removeAction->setEnabled(!this->Tree->selectedItems().isEmpty());
+  QAction* addTopLevelAction = menu.addAction(tr("Add Top-Level Block"));
+  QAction* addChildAction = itemAtPos ? menu.addAction(tr("Add Child Block")) : nullptr;
+  QAction* removeAction = itemAtPos ? menu.addAction(tr("Remove Block")) : nullptr;
 
   QAction* chosen = menu.exec(this->Tree->viewport()->mapToGlobal(pos));
-  if (chosen == addAction)
+  if (chosen == addTopLevelAction)
   {
-    this->onAddChildBlock();
+    this->onAddTopLevelBlock();
   }
-  else if (chosen == removeAction)
+  else if (addChildAction && chosen == addChildAction)
   {
+    this->addBlockUnder(this->nodeForItem(itemAtPos), itemAtPos);
+  }
+  else if (removeAction && chosen == removeAction)
+  {
+    this->Tree->setCurrentItem(itemAtPos);
     this->onRemoveBlock();
   }
 }
 
-void MooseHitEditorPanel::onAddChildBlock()
+void MooseHitEditorPanel::onAddTopLevelBlock()
 {
-  if (!this->RootNode)
+  // Always parents to the implicit root, regardless of whatever happens
+  // to be selected in the tree -- this is the one unambiguous way to add
+  // a new [BlockName] at the top level of the input file.
+  this->addBlockUnder(this->RootNode.get(), nullptr);
+}
+
+void MooseHitEditorPanel::addBlockUnder(HitNode* parentNode, QTreeWidgetItem* parentItem)
+{
+  if (!parentNode)
   {
     return;
   }
@@ -524,29 +564,16 @@ void MooseHitEditorPanel::onAddChildBlock()
     return;
   }
 
-  QList<QTreeWidgetItem*> selected = this->Tree->selectedItems();
-  HitNode* parentNode = selected.isEmpty() ? this->RootNode.get() : this->nodeForItem(selected.first());
-  QTreeWidgetItem* parentItem = selected.isEmpty() ? nullptr : selected.first();
-
   auto child = std::make_shared<HitNode>();
   child->name = name.trimmed().toStdString();
   child->parent = parentNode;
-
-  // Find the shared_ptr owner in parentNode's children to attach to -- for
-  // the root this means pushing onto RootNode->children directly.
-  if (parentNode == this->RootNode.get())
-  {
-    this->RootNode->children.push_back(child);
-  }
-  else
-  {
-    // parentNode is a raw pointer into the tree; its owning shared_ptr is
-    // held by *its* parent's children vector, so we can push directly onto
-    // parentNode->children since HitNode owns its own children vector.
-    parentNode->children.push_back(child);
-  }
+  parentNode->children.push_back(child);
 
   this->addTreeItemsRecursive(parentItem, child);
+  if (parentItem)
+  {
+    parentItem->setExpanded(true);
+  }
   this->markDirty(true);
 }
 

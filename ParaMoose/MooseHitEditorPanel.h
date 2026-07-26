@@ -42,6 +42,7 @@ public:
   ~MooseHitEditorPanel() override;
 
 private slots:
+  void onNewFile();
   void onOpenFile();
   void onSaveFile();
   void onSaveFileAs();
@@ -50,7 +51,7 @@ private slots:
 
   void onTreeSelectionChanged();
   void onTreeContextMenu(const QPoint& pos);
-  void onAddChildBlock();
+  void onAddTopLevelBlock();
   void onRemoveBlock();
 
   void onParamTableCellChanged(int row, int column);
@@ -59,10 +60,12 @@ private slots:
 
 private:
   void buildUi();
+  void resetToNewRoot();
   void loadFile(const QString& filePath);
   void saveToPath(const QString& filePath);
   void rebuildTree();
   void addTreeItemsRecursive(QTreeWidgetItem* parentItem, const std::shared_ptr<HitNode>& node);
+  void addBlockUnder(HitNode* parentNode, QTreeWidgetItem* parentItem);
   void populateParamTableFor(HitNode* node);
   HitNode* nodeForItem(QTreeWidgetItem* item) const;
   void markDirty(bool dirty);
