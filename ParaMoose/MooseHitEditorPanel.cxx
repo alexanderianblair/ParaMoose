@@ -258,8 +258,6 @@ void MooseHitEditorPanel::buildUi()
   this->ParamTable->setHorizontalHeaderLabels(QStringList() << tr("Parameter") << tr("Value"));
   this->ParamTable->horizontalHeader()->setStretchLastSection(true);
   connect(this->ParamTable, &QTableWidget::cellChanged, this, &MooseHitEditorPanel::onParamTableCellChanged);
-  connect(this->ParamTable, &QTableWidget::currentCellChanged, this,
-    &MooseHitEditorPanel::onParamTableCurrentCellChanged);
   rightLayout->addWidget(this->ParamTable);
 
   QWidget* paramButtonRow = new QWidget(rightPane);
@@ -818,7 +816,7 @@ void MooseHitEditorPanel::onViewMesh()
     source->updatePipeline();
     this->LastLoadedMeshFilePath = resolved;
 
-    // Enable visibility of the mesh as a wireframe representation in the active view. This is the same as what
+    // Enable visibility of the mesh as a wireframe representation in the active view.
     pqDataRepresentation* sourceRepresentation = builder->createDataRepresentation(source->getOutputPort(0), view);
     vtkSMProxy* reprProxy = sourceRepresentation->getProxy();
     vtkSMPropertyHelper(reprProxy, "Representation").Set("Wireframe");
@@ -934,6 +932,14 @@ void MooseHitEditorPanel::onTreeSelectionChanged()
   QList<QTreeWidgetItem*> selected = this->Tree->selectedItems();
   hit::Node* node = selected.isEmpty() ? nullptr : this->nodeForItem(selected.first());
   this->populateParamTableFor(node);
+  if (node)
+  {
+    this->updateHighlight(node);
+  }
+  else
+  {
+    this->clearHighlight();
+  }
 }
 
 void MooseHitEditorPanel::populateParamTableFor(hit::Node* node)
@@ -1154,29 +1160,6 @@ void MooseHitEditorPanel::onParamTableCellChanged(int row, int column)
 // overall approach (a second, hidden reader + representation, kept
 // separate from whatever the person is actually looking at).
 // ---------------------------------------------------------------------------
-void MooseHitEditorPanel::onParamTableCurrentCellChanged(int currentRow, int, int, int)
-{
-  if (currentRow < 0)
-  {
-    this->clearHighlight();
-    return;
-  }
-  QTableWidgetItem* nameItem = this->ParamTable->item(currentRow, NameColumn);
-  if (!nameItem)
-  {
-    this->clearHighlight();
-    return;
-  }
-  hit::Node* fieldNode = nameItem->data(Qt::UserRole).value<hit::Node*>();
-  QString paramName = nameItem->text();
-  if (!fieldNode || (paramName != "boundary" && paramName != "block"))
-  {
-    this->clearHighlight();
-    return;
-  }
-  this->updateHighlight(fieldNode, paramName);
-}
-
 void MooseHitEditorPanel::ensureHighlightSource(const QString& meshFilePath)
 {
   if (this->HighlightSource && this->HighlightSourceFilePath == meshFilePath)
@@ -1253,8 +1236,42 @@ void MooseHitEditorPanel::ensureHighlightSource(const QString& meshFilePath)
   }
 }
 
-void MooseHitEditorPanel::updateHighlight(hit::Node* fieldNode, const QString& paramName)
+void MooseHitEditorPanel::updateHighlight(hit::Node* blockNode)
 {
+  // Scan the selected block's own direct fields for "boundary" and/or
+  // "block" -- deliberately not recursive into sub-blocks, since these
+  // params belong to the specific block being highlighted, matching how
+  // MOOSE input syntax attaches them (a kernel/BC/material block has its
+  // own "boundary"/"block" params directly, not inherited from a parent
+  // section).
+  QStringList boundaryTokens;
+  QStringList blockTokens;
+  bool hasBoundary = false;
+  bool hasBlockParam = false;
+  for (hit::Node* field : blockNode->children(hit::NodeType::Field))
+  {
+    QString paramName = QString::fromStdString(field->path());
+    if (paramName == "boundary")
+    {
+      hasBoundary = true;
+      boundaryTokens =
+        QString::fromStdString(static_cast<hit::Field*>(field)->strVal()).split(' ', Qt::SkipEmptyParts);
+    }
+    else if (paramName == "block")
+    {
+      hasBlockParam = true;
+      blockTokens =
+        QString::fromStdString(static_cast<hit::Field*>(field)->strVal()).split(' ', Qt::SkipEmptyParts);
+    }
+  }
+
+  if (!hasBoundary && !hasBlockParam)
+  {
+    // Selected block has neither param -- nothing to highlight for it.
+    this->clearHighlight();
+    return;
+  }
+
   if (this->LastLoadedMeshFilePath.isEmpty())
   {
     // Nothing loaded yet (no "View Mesh" / "Run + Load Result" this
@@ -1267,36 +1284,33 @@ void MooseHitEditorPanel::updateHighlight(hit::Node* fieldNode, const QString& p
     return;
   }
 
-  QString value = QString::fromStdString(static_cast<hit::Field*>(fieldNode)->strVal());
-  QStringList tokens = value.split(' ', Qt::SkipEmptyParts);
-  std::vector<std::string> names;
-  for (const QString& t : tokens)
-  {
-    names.push_back(t.toStdString());
-  }
-
   vtkSMSourceProxy* proxy = vtkSMSourceProxy::SafeDownCast(this->HighlightSource->getProxy());
   if (!proxy)
   {
     return;
   }
 
+  std::vector<std::string> boundaryNames;
+  for (const QString& t : boundaryTokens)
+  {
+    boundaryNames.push_back(t.toStdString());
+  }
+  std::vector<std::string> blockNames;
+  for (const QString& t : blockTokens)
+  {
+    blockNames.push_back(t.toStdString());
+  }
+
   // "boundary" in MOOSE can name either a sideset or a nodeset (surface vs
   // nodal BCs both use the same parameter name), so try both -- whichever
   // doesn't match anything in this mesh simply shows nothing extra.
-  // "block" always means element blocks.
-  if (paramName == "boundary")
-  {
-    setArraySelectionProperty(proxy, "SideSetArrayStatus", names);
-    setArraySelectionProperty(proxy, "NodeSetArrayStatus", names);
-    setArraySelectionProperty(proxy, "ElementBlocks", {});
-  }
-  else
-  {
-    setArraySelectionProperty(proxy, "ElementBlocks", names);
-    setArraySelectionProperty(proxy, "SideSetArrayStatus", {});
-    setArraySelectionProperty(proxy, "NodeSetArrayStatus", {});
-  }
+  // "block" always means element blocks. A block with both params set
+  // (e.g. a BC further restricted to a subset of element blocks) shows
+  // both simultaneously rather than picking one arbitrarily.
+  setArraySelectionProperty(proxy, "SideSetArrayStatus", boundaryNames);
+  setArraySelectionProperty(proxy, "NodeSetArrayStatus", boundaryNames);
+  setArraySelectionProperty(proxy, "ElementBlocks", blockNames);
+
   proxy->UpdateVTKObjects();
   this->HighlightSource->updatePipeline();
   this->HighlightRepresentation->setVisible(true);

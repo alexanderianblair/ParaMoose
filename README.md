@@ -99,21 +99,24 @@ pick a valid one when it can.
 
 ## Highlighting boundaries/blocks
 
-Click a `boundary` or `block` parameter row in the table (just select it,
-no need to edit it) and the mesh region(s) it names highlight in solid red
-in the active render view, overlaid on whatever you're currently looking
-at. Selecting any other row, or nothing, clears the highlight.
+Select a block in the tree (left side of the Structured tab) that has a
+`boundary` and/or `block` parameter, and the mesh region(s) they name
+highlight in solid red in the active render view, overlaid on whatever
+you're currently looking at. Selecting a block with neither param, or
+nothing, clears the highlight. If a block has both (e.g. a BC further
+restricted to a subset of element blocks), both highlight together rather
+than one being picked arbitrarily.
 
 This works by spinning up a second, independent Exodus reader pointed at
 whichever file you last loaded via **View Mesh** or **Run + Load Result**
 (tracked separately from your main view so highlighting never disturbs its
 array selection or coloring), and setting that reader's own
 `SideSetArrayStatus`/`NodeSetArrayStatus`/`ElementBlocks` properties to
-show only the name(s) in the selected parameter's value - the same
-properties you'd toggle by hand in the reader's Properties panel to show
-just one sideset. `boundary` tries both sideset and nodeset names (MOOSE
-uses the same parameter name for both surface and nodal BCs); `block`
-always means element blocks.
+show only the name(s) in the selected block's `boundary`/`block` values -
+the same properties you'd toggle by hand in the reader's Properties panel
+to show just one sideset. `boundary` tries both sideset and nodeset names
+(MOOSE uses the same parameter name for both surface and nodal BCs);
+`block` always means element blocks.
 
 One implementation note worth knowing if you're reading the code: these
 properties are NOT a flat list of "enabled" names at the raw
@@ -131,6 +134,10 @@ enumerating the property's domain first.
 
 Notes/limitations:
 
+- Only looks at the selected block's own direct `boundary`/`block`
+  parameters - not inherited or looked up from sub-blocks, matching how
+  MOOSE input syntax actually attaches these (a kernel/BC/material block
+  carries its own `boundary`/`block` directly).
 - Nothing to highlight against until you've loaded a mesh or result at
   least once via **View Mesh** / **Run + Load Result** in the current
   session.
@@ -288,9 +295,9 @@ that's what you're working with.
    type/enum dropdowns and tooltips described in "Schema awareness" above.
 7. Click **View Mesh** to load the mesh referenced by the `[Mesh]` block
    directly, without running a solve. See "Viewing the input mesh" below.
-8. Click any `boundary` or `block` parameter row to highlight the region
-   it names in the render view. See "Highlighting boundaries/blocks"
-   below.
+8. Select a block in the tree that has a `boundary`/`block` parameter to
+   highlight the region(s) it names in the render view. See "Highlighting
+   boundaries/blocks" below.
 
 ## Viewing the input mesh
 

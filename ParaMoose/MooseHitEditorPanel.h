@@ -67,7 +67,6 @@ private slots:
   void onRemoveBlock();
 
   void onParamTableCellChanged(int row, int column);
-  void onParamTableCurrentCellChanged(int currentRow, int currentColumn, int previousRow, int previousColumn);
   void onAddParamRow();
   void onRemoveParamRow();
 
@@ -93,7 +92,7 @@ private:
   QString findMeshFile() const;
   QString resolveInputRelativePath(const QString& maybeRelative) const;
   void ensureHighlightSource(const QString& meshFilePath);
-  void updateHighlight(hit::Node* fieldNode, const QString& paramName);
+  void updateHighlight(hit::Node* blockNode);
   void clearHighlight();
   void refreshRawTextFromModel();
 
@@ -139,11 +138,12 @@ private:
   QString LastLoadedMeshFilePath;
 
   // A second, independent Exodus reader + representation pointed at the
-  // same file as LastLoadedMeshFilePath, used purely to highlight a
-  // boundary/block by name -- kept separate from whatever the person is
-  // actually looking at so toggling a highlight never disturbs their main
-  // view's array selection or coloring. Hidden (setVisible(false)) except
-  // while a boundary/block parameter row is the current table selection.
+  // same file as LastLoadedMeshFilePath, used purely to highlight the
+  // region(s) named by a selected block's own "boundary"/"block" params
+  // -- kept separate from whatever the person is actually looking at so
+  // toggling a highlight never disturbs their main view's array selection
+  // or coloring. Hidden (setVisible(false)) except while a block with a
+  // "boundary" or "block" parameter is the current tree selection.
   pqPipelineSource* HighlightSource = nullptr;
   pqDataRepresentation* HighlightRepresentation = nullptr;
   QString HighlightSourceFilePath;
