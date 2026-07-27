@@ -173,12 +173,23 @@ been editing there.
 
 ## Known limitations (read before relying on this)
 
-1. **`resetToNewRoot()`/"New" assumes `hit::parse(fname, "")` succeeds** and
-   returns a usable empty root. That's a reasonable assumption (empty input
-   is valid hit) but hasn't been verified against a live build in this
-   environment (no ParaView/MOOSE SDK available here) - if "New" misbehaves
-   in your build, open a minimal existing `.i` file as a workaround while
-   you look into it.
+1. **Parsing or rendering a document with zero top-level blocks crashed the
+   whole ParaView process.** This showed up as a crash on plugin load
+   (`resetToNewRoot()` runs automatically at panel construction, before
+   you've clicked anything) and, if that call was removed to work around
+   it, as the same crash switching to the Raw Text tab with nothing loaded
+   - both are the same underlying issue: `hit::parse()`/`render()` on a
+   genuinely empty/childless document. A first attempt (parsing `"\n"`
+   instead of `""`) didn't fix it, which is what pointed at "zero blocks"
+   rather than "empty string" as the actual trigger. Fixed by never
+   calling `hit::parse()`/`render()` on empty content at all:
+   `RootNode` is left null for a brand-new, never-saved input (see
+   `clearRootNodeWithoutParsing()`), and the first **Add Top-Level Block**
+   bootstraps a real root together with that first block in one
+   `hit::parse()` call that's never trivial (see `addBlockUnder()`). The
+   same guard now also applies to opening a genuinely empty `.i` file and
+   to clicking **Apply Changes** on blank raw text. Still worth confirming
+   against your build - this environment has no way to compile-test.
 2. **Schema awareness is best-effort, not validation.** The `--json`-backed
    dropdowns/tooltips (see "Schema awareness" above) help you pick valid
    values but don't stop you from typing something the schema doesn't know

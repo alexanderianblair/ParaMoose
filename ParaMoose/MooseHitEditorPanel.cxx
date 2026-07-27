@@ -54,6 +54,7 @@
 #include <QWidget>
 
 #include <algorithm>
+#include <exception>
 #include <string>
 #include <vector>
 
@@ -331,7 +332,38 @@ void MooseHitEditorPanel::buildUi()
 void MooseHitEditorPanel::setRootFromParsedText(const QString& fname, const QString& text)
 {
   std::vector<hit::ErrorMessage> errors;
-  hit::Node* parsed = hit::parse(fname.toStdString(), text.toStdString(), &errors);
+  hit::Node* parsed = nullptr;
+  QString exceptionMessage;
+  try
+  {
+    // Documented behavior is that syntax_errors being non-null means parse
+    // failures get reported through *errors* rather than thrown -- but
+    // that guarantee turned out not to cover every edge case (an entirely
+    // empty document being the one that actually bit this plugin; see
+    // resetToNewRoot()). Wrapping this in try/catch is a safety net so a
+    // parser-level exception on some other edge case can't take down the
+    // whole ParaView process the way an uncaught one did here.
+    parsed = hit::parse(fname.toStdString(), text.toStdString(), &errors);
+  }
+  catch (const std::exception& e)
+  {
+    exceptionMessage = QString::fromStdString(e.what());
+  }
+  catch (...)
+  {
+    exceptionMessage = tr("(no exception details available)");
+  }
+
+  if (!parsed)
+  {
+    QMessageBox::warning(this, tr("Failed to parse"),
+      exceptionMessage.isEmpty()
+        ? tr("hit::parse() returned no data for this input.")
+        : tr("hit::parse() threw an exception: %1").arg(exceptionMessage));
+    // Leave the existing RootNode (if any) untouched rather than replacing
+    // it with nothing -- whatever was open/being edited is still intact.
+    return;
+  }
 
   if (this->RootNode)
   {
@@ -352,14 +384,34 @@ void MooseHitEditorPanel::setRootFromParsedText(const QString& fname, const QStr
   // Every path that replaces RootNode (New, Open, and Apply Changes on the
   // Raw Text tab) funnels through here, so this is the one place that
   // needs to re-sync the raw text preview to match.
-  // this->refreshRawTextFromModel();
+  this->refreshRawTextFromModel();
+}
+
+// Tears down RootNode without ever calling hit::parse()/render() on empty
+// content. Rendering (or possibly parsing -- the exact failure point
+// wasn't pinned down, see the "Known limitations" note in the README)
+// appears to crash outright for a document with zero top-level blocks in
+// it, rather than reporting a clean error. Rather than keep chasing
+// exactly which call is unsafe on trivial input, RootNode is now simply
+// left null whenever there's no real content, and the first
+// "Add Top-Level Block" bootstraps a real root together with that first
+// block in a single hit::parse() call that's never trivial/empty (see
+// addBlockUnder()).
+void MooseHitEditorPanel::clearRootNodeWithoutParsing()
+{
+  if (this->RootNode)
+  {
+    delete this->RootNode;
+    this->RootNode = nullptr;
+  }
+  this->rebuildTree();
+  this->refreshRawTextFromModel();
 }
 
 void MooseHitEditorPanel::resetToNewRoot()
 {
-  this->setRootFromParsedText("new_input", "");
+  this->clearRootNodeWithoutParsing();
   this->CurrentFilePath.clear();
-  this->rebuildTree();
   this->markDirty(false);
   this->SaveAction->setEnabled(true);
   this->RunAction->setEnabled(false);
@@ -426,16 +478,26 @@ void MooseHitEditorPanel::onRefreshRawTextFromModel()
 void MooseHitEditorPanel::onApplyRawText()
 {
   QString text = this->RawTextEdit->toPlainText();
-  QString fname = this->CurrentFilePath.isEmpty() ? QStringLiteral("raw_text_edit") : this->CurrentFilePath;
+  this->ParamTable->setRowCount(0);
+
+  if (text.trimmed().isEmpty())
+  {
+    // Same crash surface as an empty "New" document -- see the comment on
+    // clearRootNodeWithoutParsing() for why this avoids hit::parse()/
+    // render() entirely here rather than calling them on blank text.
+    this->clearRootNodeWithoutParsing();
+    this->markDirty(true);
+    return;
+  }
 
   // setRootFromParsedText() replaces RootNode wholesale, which invalidates
-  // every hit::Node* the tree/table currently hold onto -- clear the
-  // param table (rebuildTree() below handles the tree itself) before it
-  // runs so nothing dangles in between. It also re-syncs RawTextEdit
-  // itself afterward (see its own comment), so what's shown after Apply
-  // is the canonical re-rendered form of what was just typed, which
-  // doubles as a way to confirm what was actually parsed.
-  this->ParamTable->setRowCount(0);
+  // every hit::Node* the tree/table currently hold onto -- the param table
+  // was already cleared above; rebuildTree() below handles the tree
+  // itself. It also re-syncs RawTextEdit afterward (see its own comment),
+  // so what's shown after Apply is the canonical re-rendered form of what
+  // was just typed, which doubles as a way to confirm what was actually
+  // parsed.
+  QString fname = this->CurrentFilePath.isEmpty() ? QStringLiteral("raw_text_edit") : this->CurrentFilePath;
   this->setRootFromParsedText(fname, text);
   this->rebuildTree();
   this->markDirty(true);
@@ -488,10 +550,19 @@ void MooseHitEditorPanel::loadFile(const QString& filePath)
   QString text = in.readAll();
   file.close();
 
-  this->setRootFromParsedText(filePath, text);
+  if (text.trimmed().isEmpty())
+  {
+    // Same crash surface as an empty "New" document -- see the comment on
+    // clearRootNodeWithoutParsing().
+    this->clearRootNodeWithoutParsing();
+  }
+  else
+  {
+    this->setRootFromParsedText(filePath, text);
+    this->rebuildTree();
+  }
 
   this->CurrentFilePath = filePath;
-  this->rebuildTree();
   this->markDirty(false);
   this->SaveAction->setEnabled(true);
   this->RunAction->setEnabled(true);
@@ -523,6 +594,8 @@ void MooseHitEditorPanel::saveToPath(const QString& filePath)
 {
   if (!this->RootNode)
   {
+    QMessageBox::information(
+      this, tr("Nothing to save"), tr("Add at least one top-level block before saving."));
     return;
   }
   // render() is hit's own serializer -- it applies MOOSE's real quoting/
@@ -756,8 +829,6 @@ void MooseHitEditorPanel::onViewMesh()
     QMessageBox::warning(
       this, tr("Failed to load mesh"), tr("ParaView's Exodus reader could not open:\n%1").arg(resolved));
   }
-
-
 }
 
 // ---------------------------------------------------------------------------
@@ -983,18 +1054,30 @@ void MooseHitEditorPanel::onAddTopLevelBlock()
 
 void MooseHitEditorPanel::addBlockUnder(hit::Node* parentNode, QTreeWidgetItem* parentItem)
 {
-  if (!parentNode)
-  {
-    return;
-  }
   bool ok = false;
   QString name = QInputDialog::getText(this, tr("New Block"), tr("Block name:"), QLineEdit::Normal, QString(), &ok);
   if (!ok || name.trimmed().isEmpty())
   {
     return;
   }
+  QString trimmedName = name.trimmed();
 
-  hit::Node* child = new hit::Section(name.trimmed().toStdString());
+  if (!parentNode)
+  {
+    // parentNode is only ever null here for the "Add Top-Level Block"
+    // case when there's no root yet (a brand-new, never-saved input --
+    // see resetToNewRoot()). Bootstrap the root and this first top-level
+    // section together in one hit::parse() call with real content in it,
+    // rather than ever parsing/rendering a genuinely empty document (see
+    // clearRootNodeWithoutParsing() for why that's avoided entirely now).
+    QString fname = this->CurrentFilePath.isEmpty() ? QStringLiteral("new_input") : this->CurrentFilePath;
+    this->setRootFromParsedText(fname, "[" + trimmedName + "]\n[]\n");
+    this->rebuildTree();
+    this->markDirty(true);
+    return;
+  }
+
+  hit::Node* child = new hit::Section(trimmedName.toStdString());
   parentNode->addChild(child);
 
   this->addTreeItemsRecursive(parentItem, child);

@@ -79,6 +79,7 @@ private:
   void buildUi();
   void resetToNewRoot();
   void setRootFromParsedText(const QString& fname, const QString& text);
+  void clearRootNodeWithoutParsing();
   void loadFile(const QString& filePath);
   void saveToPath(const QString& filePath);
   void rebuildTree();
