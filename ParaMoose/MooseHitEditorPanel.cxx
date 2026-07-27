@@ -737,18 +737,27 @@ void MooseHitEditorPanel::onViewMesh()
 
   pqObjectBuilder* builder = pqApplicationCore::instance()->getObjectBuilder();
   pqServer* server = pqActiveObjects::instance().activeServer();
+  pqView* view = pqActiveObjects::instance().activeView();
   pqPipelineSource* source =
     builder->createReader("sources", readerProxyName, QStringList(resolved), server);
   if (source)
   {
     source->updatePipeline();
     this->LastLoadedMeshFilePath = resolved;
+
+    // Enable visibility of the mesh as a wireframe representation in the active view. This is the same as what
+    pqDataRepresentation* sourceRepresentation = builder->createDataRepresentation(source->getOutputPort(0), view);
+    vtkSMProxy* reprProxy = sourceRepresentation->getProxy();
+    vtkSMPropertyHelper(reprProxy, "Representation").Set("Wireframe");
+    reprProxy->UpdateVTKObjects();
   }
   else
   {
     QMessageBox::warning(
       this, tr("Failed to load mesh"), tr("ParaView's Exodus reader could not open:\n%1").arg(resolved));
   }
+
+
 }
 
 // ---------------------------------------------------------------------------
