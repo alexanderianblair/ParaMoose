@@ -206,6 +206,7 @@ void MooseHitEditorPanel::buildUi()
   toolbar->addSeparator();
   this->RunAction = toolbar->addAction(tr("Run + Load Result"));
   this->ViewMeshAction = toolbar->addAction(tr("View Mesh"));
+  this->MultiAppsAction = toolbar->addAction(tr("MultiApps..."));
   toolbar->addSeparator();
   QAction* loadSchemaAction = toolbar->addAction(tr("Load App Schema..."));
   this->RunAction->setEnabled(false);
@@ -216,6 +217,7 @@ void MooseHitEditorPanel::buildUi()
   connect(saveAsAction, &QAction::triggered, this, &MooseHitEditorPanel::onSaveFileAs);
   connect(this->RunAction, &QAction::triggered, this, &MooseHitEditorPanel::onRunSolve);
   connect(this->ViewMeshAction, &QAction::triggered, this, &MooseHitEditorPanel::onViewMesh);
+  connect(this->MultiAppsAction, &QAction::triggered, this, &MooseHitEditorPanel::onMultiAppsMenu);
   connect(loadSchemaAction, &QAction::triggered, this, &MooseHitEditorPanel::onLoadSchema);
 
   mainLayout->addWidget(toolbar);
@@ -410,6 +412,9 @@ void MooseHitEditorPanel::resetToNewRoot()
 {
   this->clearRootNodeWithoutParsing();
   this->CurrentFilePath.clear();
+  // A fresh browsing context -- any "Back" target from prior MultiApps
+  // navigation no longer applies once the input itself has been reset.
+  this->MultiAppNavigationHistory.clear();
   this->markDirty(false);
   this->SaveAction->setEnabled(true);
   this->RunAction->setEnabled(false);
@@ -501,30 +506,31 @@ void MooseHitEditorPanel::onApplyRawText()
   this->markDirty(true);
 }
 
+bool MooseHitEditorPanel::confirmDiscardIfDirty(const QString& title, const QString& message)
+{
+  if (!this->Dirty)
+  {
+    return true;
+  }
+  return QMessageBox::question(this, title, message) == QMessageBox::Yes;
+}
+
 void MooseHitEditorPanel::onNewFile()
 {
-  if (this->Dirty)
+  if (!this->confirmDiscardIfDirty(
+        tr("Discard changes?"), tr("The current input has unsaved changes. Start a new one anyway?")))
   {
-    auto reply = QMessageBox::question(
-      this, tr("Discard changes?"), tr("The current input has unsaved changes. Start a new one anyway?"));
-    if (reply != QMessageBox::Yes)
-    {
-      return;
-    }
+    return;
   }
   this->resetToNewRoot();
 }
 
 void MooseHitEditorPanel::onOpenFile()
 {
-  if (this->Dirty)
+  if (!this->confirmDiscardIfDirty(
+        tr("Discard changes?"), tr("The current input has unsaved changes. Open a new file anyway?")))
   {
-    auto reply = QMessageBox::question(this, tr("Discard changes?"),
-      tr("The current input has unsaved changes. Open a new file anyway?"));
-    if (reply != QMessageBox::Yes)
-    {
-      return;
-    }
+    return;
   }
 
   QString filePath = QFileDialog::getOpenFileName(
@@ -533,6 +539,11 @@ void MooseHitEditorPanel::onOpenFile()
   {
     return;
   }
+  // A fresh browsing context -- any "Back" target from prior MultiApps
+  // navigation no longer applies once a different file has been opened
+  // directly (as opposed to navigated to via the MultiApps menu, which
+  // manages this stack itself through navigateToFile()).
+  this->MultiAppNavigationHistory.clear();
   this->loadFile(filePath);
 }
 
@@ -830,6 +841,117 @@ void MooseHitEditorPanel::onViewMesh()
 }
 
 // ---------------------------------------------------------------------------
+// MultiApps navigation: find sub-app input files referenced by a
+// [MultiApps] block, and let the person hop between them and back without
+// leaving the panel or hunting for the file on disk themselves.
+// ---------------------------------------------------------------------------
+QVector<QPair<QString, QString>> MooseHitEditorPanel::findMultiAppFiles() const
+{
+  QVector<QPair<QString, QString>> result;
+  if (!this->RootNode)
+  {
+    return result;
+  }
+  for (hit::Node* child : this->RootNode->children(hit::NodeType::Section))
+  {
+    if (child->path() != "MultiApps")
+    {
+      continue;
+    }
+    // Each direct sub-block of [MultiApps] is one sub-app, e.g.
+    //   [MultiApps]
+    //     [my_subapp]
+    //       type = TransientMultiApp
+    //       input_files = 'sub.i'
+    //     []
+    //   []
+    // input_files is space-separated and can name more than one file (one
+    // per position, for a "positions"-driven MultiApp) -- each becomes
+    // its own entry here.
+    for (hit::Node* subApp : child->children(hit::NodeType::Section))
+    {
+      QString subAppName = QString::fromStdString(subApp->path());
+      for (hit::Node* field : subApp->children(hit::NodeType::Field))
+      {
+        if (QString::fromStdString(field->path()) != "input_files")
+        {
+          continue;
+        }
+        QString value = QString::fromStdString(static_cast<hit::Field*>(field)->strVal());
+        for (const QString& token : value.split(' ', Qt::SkipEmptyParts))
+        {
+          result.push_back(qMakePair(subAppName, this->resolveInputRelativePath(token)));
+        }
+      }
+    }
+    break; // only one [MultiApps] block is valid per input
+  }
+  return result;
+}
+
+void MooseHitEditorPanel::navigateToFile(const QString& filePath, bool pushHistory)
+{
+  if (!this->confirmDiscardIfDirty(
+        tr("Discard changes?"), tr("The current input has unsaved changes. Navigate away anyway?")))
+  {
+    return;
+  }
+  if (pushHistory && !this->CurrentFilePath.isEmpty())
+  {
+    this->MultiAppNavigationHistory.push_back(this->CurrentFilePath);
+  }
+  this->loadFile(filePath);
+}
+
+void MooseHitEditorPanel::onMultiAppsMenu()
+{
+  QMenu menu(this);
+
+  if (!this->MultiAppNavigationHistory.isEmpty())
+  {
+    QString backTarget = this->MultiAppNavigationHistory.last();
+    QAction* backAction = menu.addAction(tr("<< Back to %1").arg(QFileInfo(backTarget).fileName()));
+    connect(backAction, &QAction::triggered, this, [this, backTarget]() {
+      QString target = backTarget;
+      this->MultiAppNavigationHistory.removeLast();
+      this->navigateToFile(target, false);
+    });
+    menu.addSeparator();
+  }
+
+  QVector<QPair<QString, QString>> subApps = this->findMultiAppFiles();
+  if (subApps.isEmpty())
+  {
+    QAction* noneAction = menu.addAction(
+      this->CurrentFilePath.isEmpty() ? tr("(no input open)") : tr("No [MultiApps] block in this input"));
+    noneAction->setEnabled(false);
+  }
+  else
+  {
+    for (const auto& entry : subApps)
+    {
+      const QString& subAppName = entry.first;
+      const QString& filePath = entry.second;
+      QAction* action = menu.addAction(tr("%1 -> %2").arg(subAppName, QFileInfo(filePath).fileName()));
+      if (!QFileInfo::exists(filePath))
+      {
+        action->setEnabled(false);
+        action->setText(action->text() + tr(" (not found)"));
+      }
+      else
+      {
+        connect(action, &QAction::triggered, this, [this, filePath]() { this->navigateToFile(filePath, true); });
+      }
+    }
+  }
+
+  QWidget* button = this->MultiAppsAction->associatedWidgets().isEmpty()
+    ? static_cast<QWidget*>(this)
+    : this->MultiAppsAction->associatedWidgets().first();
+  menu.exec(button->mapToGlobal(QPoint(0, button->height())));
+}
+
+// ---------------------------------------------------------------------------
 // Schema awareness: run `<exe> --json` and parse MOOSE's syntax dump so the
 // parameter table can offer type dropdowns / enum dropdowns / tooltips.
 // ---------------------------------------------------------------------------
@@ -899,6 +1021,28 @@ void MooseHitEditorPanel::rebuildTree()
   {
     return;
   }
+
+  // Bare `name = value` declarations directly at the top level (outside
+  // any [Block]) are the common MOOSE idiom for defining a value once and
+  // referencing it elsewhere via ${name} (see resolveBraceExpr()). They
+  // have no [Block] of their own, so without this they'd be invisible in
+  // the tree entirely -- populateParamTableFor() already works on any
+  // node's direct Field children regardless of whether that node is a
+  // "real" Section or the root, so tagging this synthetic item with
+  // RootNode itself is enough to make it just work with all the existing
+  // parameter-table view/edit/add/remove machinery unchanged. It's a UI
+  // convenience only, not a real HIT section -- onTreeContextMenu() knows
+  // to hide "Add Child Block"/"Remove Block" for it specifically.
+  if (!this->RootNode->children(hit::NodeType::Field).empty())
+  {
+    QTreeWidgetItem* topLevelParamsItem = new QTreeWidgetItem(this->Tree);
+    topLevelParamsItem->setText(0, tr("(top-level parameters)"));
+    topLevelParamsItem->setData(0, Qt::UserRole, QVariant::fromValue(this->RootNode));
+    QFont italicFont = topLevelParamsItem->font(0);
+    italicFont.setItalic(true);
+    topLevelParamsItem->setFont(0, italicFont);
+  }
+
   for (hit::Node* child : this->RootNode->children(hit::NodeType::Section))
   {
     this->addTreeItemsRecursive(nullptr, child);
@@ -1028,11 +1172,17 @@ void MooseHitEditorPanel::populateParamTableFor(hit::Node* node)
 void MooseHitEditorPanel::onTreeContextMenu(const QPoint& pos)
 {
   QTreeWidgetItem* itemAtPos = this->Tree->itemAt(pos);
+  // The synthetic "(top-level parameters)" item (see rebuildTree()) is
+  // tagged with RootNode itself rather than a real Section -- "Add Child
+  // Block" under it would visually nest a real block under a fake label,
+  // and "Remove Block" on it would mean deleting the root. Neither makes
+  // sense, so both are hidden specifically for that item.
+  bool itemIsRealBlock = itemAtPos && this->nodeForItem(itemAtPos) != this->RootNode;
 
   QMenu menu(this);
   QAction* addTopLevelAction = menu.addAction(tr("Add Top-Level Block"));
-  QAction* addChildAction = itemAtPos ? menu.addAction(tr("Add Child Block")) : nullptr;
-  QAction* removeAction = itemAtPos ? menu.addAction(tr("Remove Block")) : nullptr;
+  QAction* addChildAction = itemIsRealBlock ? menu.addAction(tr("Add Child Block")) : nullptr;
+  QAction* removeAction = itemIsRealBlock ? menu.addAction(tr("Remove Block")) : nullptr;
 
   QAction* chosen = menu.exec(this->Tree->viewport()->mapToGlobal(pos));
   if (chosen == addTopLevelAction)
@@ -1236,6 +1386,40 @@ void MooseHitEditorPanel::ensureHighlightSource(const QString& meshFilePath)
   }
 }
 
+QString MooseHitEditorPanel::resolveBraceExpr(hit::Node* field) const
+{
+  hit::Field* f = static_cast<hit::Field*>(field);
+  // BraceExpander::expand() resolves ${name}-style substitutions by
+  // walking up from `f` looking for a sibling/ancestor field named
+  // `name` (confirmed against hit's own source -- this is exactly how
+  // MOOSE's "define a value once at the top of the file, reference it
+  // via ${name} elsewhere" idiom works). It only mutates the field's
+  // *kind* metadata as a side effect (via a `setVal(val, newKind)` call
+  // that reuses the existing text), never the literal ${...} text itself
+  // -- so the original substitution reference is preserved for display/
+  // editing/saving; only the resolved string returned here is different.
+  //
+  // It can also throw hit::Error -- e.g. for ${fparse ...} or any other
+  // named-evaler form, since this plugin only wires up plain ${name}
+  // substitution and doesn't register a math evaler the way MOOSE itself
+  // does elsewhere. Falling back to the raw text on failure degrades the
+  // same way an unresolvable literal name already does elsewhere in this
+  // feature: nothing matches, nothing highlights, no crash.
+  try
+  {
+    hit::BraceExpander expander;
+    return QString::fromStdString(expander.expand(f, f->strVal()));
+  }
+  catch (const hit::Error&)
+  {
+    return QString::fromStdString(f->strVal());
+  }
+  catch (...)
+  {
+    return QString::fromStdString(f->strVal());
+  }
+}
+
 void MooseHitEditorPanel::updateHighlight(hit::Node* blockNode)
 {
   // Scan the selected block's own direct fields for "boundary" and/or
@@ -1254,14 +1438,12 @@ void MooseHitEditorPanel::updateHighlight(hit::Node* blockNode)
     if (paramName == "boundary")
     {
       hasBoundary = true;
-      boundaryTokens =
-        QString::fromStdString(static_cast<hit::Field*>(field)->strVal()).split(' ', Qt::SkipEmptyParts);
+      boundaryTokens = this->resolveBraceExpr(field).split(' ', Qt::SkipEmptyParts);
     }
     else if (paramName == "block")
     {
       hasBlockParam = true;
-      blockTokens =
-        QString::fromStdString(static_cast<hit::Field*>(field)->strVal()).split(' ', Qt::SkipEmptyParts);
+      blockTokens = this->resolveBraceExpr(field).split(' ', Qt::SkipEmptyParts);
     }
   }
 

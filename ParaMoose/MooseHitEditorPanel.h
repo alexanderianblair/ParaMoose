@@ -10,7 +10,8 @@
 // has no way to add/see them).
 //
 // Layout:
-//   [ toolbar: New | Open | Save | Save As | Run | View Mesh | Load Schema ]
+//   [ toolbar: New | Open | Save | Save As | Run | View Mesh |
+//     MultiApps... | Load Schema ]
 //   [ tabs: "Structured" (tree + parameter table) | "Raw Text" (editable
 //     render() preview, synced explicitly via Apply/Refresh, not live) ]
 //   [ pqOutputWidget: streamed solver output from "Run + Load Result" ]
@@ -20,6 +21,9 @@
 #include "MooseSchema.h"
 
 #include <QDockWidget>
+#include <QPair>
+#include <QStringList>
+#include <QVector>
 
 class QTreeWidget;
 class QTreeWidgetItem;
@@ -60,6 +64,7 @@ private slots:
   void onRunSolve();
   void onLoadSchema();
   void onViewMesh();
+  void onMultiAppsMenu();
 
   void onTreeSelectionChanged();
   void onTreeContextMenu(const QPoint& pos);
@@ -94,13 +99,18 @@ private:
   void ensureHighlightSource(const QString& meshFilePath);
   void updateHighlight(hit::Node* blockNode);
   void clearHighlight();
+  QString resolveBraceExpr(hit::Node* field) const;
   void refreshRawTextFromModel();
+  bool confirmDiscardIfDirty(const QString& title, const QString& message);
+  QVector<QPair<QString, QString>> findMultiAppFiles() const;
+  void navigateToFile(const QString& filePath, bool pushHistory);
 
   QTreeWidget* Tree = nullptr;
   QTableWidget* ParamTable = nullptr;
   QAction* SaveAction = nullptr;
   QAction* RunAction = nullptr;
   QAction* ViewMeshAction = nullptr;
+  QAction* MultiAppsAction = nullptr;
   QLineEdit* ExecutablePathEdit = nullptr;
   QLabel* SchemaStatusLabel = nullptr;
   pqOutputWidget* OutputWidget = nullptr;
@@ -129,6 +139,16 @@ private:
   hit::Node* RootNode = nullptr;
   QString CurrentFilePath;
   bool Dirty = false;
+
+  // Stack of file paths visited on the way to whatever's currently open,
+  // via the MultiApps navigation menu (see onMultiAppsMenu()/
+  // navigateToFile()). Each entry is where "Back" goes next; grows by one
+  // on every sub-app hop and shrinks by one on Back, so a chain of nested
+  // MultiApps (main -> sub -> sub-sub -> ...) can be walked back out of
+  // one level at a time. Not touched by Open/New -- only by the MultiApps
+  // menu itself, so opening an unrelated file doesn't leave stale entries
+  // pointing at a different MultiApp hierarchy.
+  QStringList MultiAppNavigationHistory;
 
   MooseSchema Schema;
 

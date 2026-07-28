@@ -118,6 +118,36 @@ to show just one sideset. `boundary` tries both sideset and nodeset names
 (MOOSE uses the same parameter name for both surface and nodal BCs);
 `block` always means element blocks.
 
+**`${name}` substitutions are resolved before matching.** MOOSE input
+files commonly define a value once and reuse it elsewhere via `${name}`:
+
+```
+active_boundary = 'right'
+
+[BCs]
+  [my_bc]
+    type = DirichletBC
+    boundary = ${active_boundary}
+    ...
+  []
+[]
+```
+
+`boundary`/`block` values are resolved through `hit`'s own `BraceExpander`
+(`resolveBraceExpr()` in `MooseHitEditorPanel.cxx`) before being matched
+against the mesh, so `${active_boundary}` highlights `right` correctly
+rather than being treated as a literal (and nonexistent) region name. This
+only resolves plain `${name}` substitution, not expression forms like
+`${fparse ...}` - those need a math evaler this plugin doesn't register
+(MOOSE registers one elsewhere, using its own FParser integration); an
+unresolvable expression falls back to the raw text, which just won't
+match anything in the mesh - same silent "nothing found" behavior as any
+other typo, not a crash. Resolving a `${name}` only affects what gets
+matched against the mesh for highlighting - the field's own stored value
+(and what gets saved) keeps the original `${active_boundary}` text, so
+this doesn't flatten the reuse pattern the file was written to take
+advantage of.
+
 One implementation note worth knowing if you're reading the code: these
 properties are NOT a flat list of "enabled" names at the raw
 `vtkSMStringVectorProperty` level, even though `paraview.simple` presents
@@ -138,6 +168,10 @@ Notes/limitations:
   parameters - not inherited or looked up from sub-blocks, matching how
   MOOSE input syntax actually attaches these (a kernel/BC/material block
   carries its own `boundary`/`block` directly).
+- `${name}` resolution walks up from the field itself through its
+  ancestor blocks (including top-level bare declarations - see "Top-level
+  parameters" below), matching how MOOSE itself resolves the reference.
+  It does not look sideways into unrelated blocks.
 - Nothing to highlight against until you've loaded a mesh or result at
   least once via **View Mesh** / **Run + Load Result** in the current
   session.
@@ -151,7 +185,19 @@ Notes/limitations:
   for ParaView's own session cleanup, consistent with how the main
   mesh/result sources are already handled elsewhere in this plugin.
 
-## Raw text preview
+## Top-level parameters
+
+MOOSE input files often define a bare `name = value` directly at the top
+level (outside any `[Block]`), purely so it can be referenced elsewhere
+via `${name}` - see the substitution example above. These have no
+`[Block]` of their own, so an item labeled *(top-level parameters)* (in
+italics, to distinguish it from a real HIT block) appears at the top of
+the tree whenever the current input has any, giving you the same
+view/edit/add/remove capability the parameter table already gives every
+other block. It's a UI convenience only, not a real HIT section - you
+can't add a child block under it or remove it via the tree's context
+menu, and it disappears from the tree entirely (rather than showing up
+empty) once the input has no bare top-level parameters left.
 
 The **Raw Text** tab (next to **Structured**) shows exactly what
 `render()` would write to disk - white text on black, monospace, editable.
@@ -177,6 +223,41 @@ other:
 **Save** - Save always writes the current *structured* model, not
 whatever's in the raw text box. Click **Apply Changes** first if you've
 been editing there.
+
+## MultiApps navigation
+
+Click **MultiApps...** in the toolbar to see and jump to sub-app input
+files referenced by the current input's `[MultiApps]` block:
+
+```
+[MultiApps]
+  [my_subapp]
+    type = TransientMultiApp
+    input_files = 'sub.i'
+  []
+[]
+```
+
+The menu lists every sub-app found (`<sub-app name> -> <file>`, resolved
+relative to the current input's location, same as **View Mesh**'s `file`
+resolution); picking one opens it the same way **Open...** would (with the
+usual unsaved-changes prompt first). If a sub-app has multiple
+`input_files` (a "positions"-driven MultiApp with several instances), each
+one gets its own menu entry. A referenced file that doesn't actually exist
+on disk shows up disabled and marked "(not found)" rather than being
+silently omitted.
+
+Once you've navigated into a sub-app, the menu also gains a **Back to
+`<parent>.i`** entry at the top, so you can hop back out - and since each
+hop pushes onto the same stack, this walks back out of nested MultiApps
+(a sub-app that itself has a `[MultiApps]` block) one level at a time, not
+just one level total. Manually opening a different file via **Open...** or
+starting over with **New** clears this stack, since a "Back" target from
+an unrelated file no longer makes sense at that point.
+
+If the current input has no `[MultiApps]` block at all, the menu just
+shows a disabled "No `[MultiApps]` block in this input" entry rather than
+nothing happening when you click it.
 
 ## Known limitations (read before relying on this)
 
@@ -219,6 +300,13 @@ been editing there.
    reference panel members briefly during teardown. Fine for normal usage
    (they're no-ops once the process is gone); a production version would
    want more defensive lifetime handling here.
+6. **`${...}` resolution only covers plain `${name}` substitution**, not
+   expression forms like `${fparse 2*pi}` - see "Highlighting boundaries/
+   blocks" above for why (this plugin doesn't register a math evaler the
+   way MOOSE itself does). Highlighting just won't match anything for
+   those, the same as any other unresolvable name; the raw `${fparse ...}`
+   text itself is untouched either way since resolution never mutates the
+   field's stored value.
 
 ## Building
 
@@ -279,7 +367,9 @@ that's what you're working with.
    currently selected. Right-click an existing block for **Add Child
    Block** (adds under that block) or **Remove Block**.
 3. Click a block in the tree to see/edit its parameters in the table on the
-   right.
+   right. If the input has bare top-level parameters (see "Top-level
+   parameters" below), an italicized *(top-level parameters)* item at the
+   top of the tree works the same way.
 3. Use **Add Parameter** / **Remove Selected** under the table to edit
    parameters for the selected block.
 4. **Save** / **Save As...** writes the tree back out in hit format.
@@ -298,6 +388,8 @@ that's what you're working with.
 8. Select a block in the tree that has a `boundary`/`block` parameter to
    highlight the region(s) it names in the render view. See "Highlighting
    boundaries/blocks" below.
+9. Click **MultiApps...** to jump to a sub-app's input file if the current
+   input has a `[MultiApps]` block. See "MultiApps navigation" below.
 
 ## Viewing the input mesh
 
