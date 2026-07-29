@@ -1114,6 +1114,22 @@ void MooseHitEditorPanel::populateParamTableFor(hit::Node* node)
     // selection (which can drift out of sync with table rows).
     nameItem->setData(Qt::UserRole, QVariant::fromValue(fieldNode));
 
+    // If the value contains a ${...} substitution, show what it actually
+    // resolves to -- otherwise there's no way to tell what e.g.
+    // `diffusivity = ${diff_coef}` actually means without hunting down
+    // where diff_coef is defined. Uses the same resolveBraceExpr() the
+    // boundary/block highlighting feature relies on; see its comment for
+    // what this can/can't resolve (plain ${name}, not ${fparse ...}).
+    QString braceTip;
+    if (paramValue.contains("${"))
+    {
+      QString resolved = this->resolveBraceExpr(fieldNode);
+      if (resolved != paramValue)
+      {
+        braceTip = tr("Resolves to: %1").arg(resolved);
+      }
+    }
+
     MooseParamInfo info;
     QStringList options = (paramName == "type") ? typeChoices : QStringList();
     if (this->Schema.paramInfo(paramName, info))
@@ -1143,6 +1159,10 @@ void MooseHitEditorPanel::populateParamTableFor(hit::Node* node)
       // know about (e.g. a newer type than what --json reported).
       QComboBox* combo = new QComboBox(this->ParamTable);
       combo->setEditable(true);
+      if (!braceTip.isEmpty())
+      {
+        combo->setToolTip(braceTip);
+      }
       combo->addItems(options);
       int existingIndex = options.indexOf(paramValue);
       if (existingIndex >= 0)
@@ -1162,7 +1182,12 @@ void MooseHitEditorPanel::populateParamTableFor(hit::Node* node)
     }
     else
     {
-      this->ParamTable->setItem(row, ValueColumn, new QTableWidgetItem(paramValue));
+      QTableWidgetItem* valueItem = new QTableWidgetItem(paramValue);
+      if (!braceTip.isEmpty())
+      {
+        valueItem->setToolTip(braceTip);
+      }
+      this->ParamTable->setItem(row, ValueColumn, valueItem);
     }
   }
 
@@ -1182,6 +1207,7 @@ void MooseHitEditorPanel::onTreeContextMenu(const QPoint& pos)
   QMenu menu(this);
   QAction* addTopLevelAction = menu.addAction(tr("Add Top-Level Block"));
   QAction* addChildAction = itemIsRealBlock ? menu.addAction(tr("Add Child Block")) : nullptr;
+  QAction* duplicateAction = itemIsRealBlock ? menu.addAction(tr("Duplicate Block")) : nullptr;
   QAction* removeAction = itemIsRealBlock ? menu.addAction(tr("Remove Block")) : nullptr;
 
   QAction* chosen = menu.exec(this->Tree->viewport()->mapToGlobal(pos));
@@ -1192,6 +1218,11 @@ void MooseHitEditorPanel::onTreeContextMenu(const QPoint& pos)
   else if (addChildAction && chosen == addChildAction)
   {
     this->addBlockUnder(this->nodeForItem(itemAtPos), itemAtPos);
+  }
+  else if (duplicateAction && chosen == duplicateAction)
+  {
+    this->Tree->setCurrentItem(itemAtPos);
+    this->onDuplicateBlock();
   }
   else if (removeAction && chosen == removeAction)
   {
@@ -1244,6 +1275,91 @@ void MooseHitEditorPanel::addBlockUnder(hit::Node* parentNode, QTreeWidgetItem* 
   this->markDirty(true);
 }
 
+void MooseHitEditorPanel::onDuplicateBlock()
+{
+  QList<QTreeWidgetItem*> selected = this->Tree->selectedItems();
+  if (selected.isEmpty())
+  {
+    return;
+  }
+  QTreeWidgetItem* item = selected.first();
+  hit::Node* node = this->nodeForItem(item);
+  // node == RootNode guards against the synthetic "(top-level parameters)"
+  // item -- onTreeContextMenu() already hides this action for it, but
+  // this is cheap insurance against reaching here some other way.
+  if (!node || node == this->RootNode || !node->parent())
+  {
+    return;
+  }
+
+  bool ok = false;
+  QString defaultName = QString::fromStdString(node->path()) + "_copy";
+  QString newName = QInputDialog::getText(
+    this, tr("Duplicate Block"), tr("Name for the duplicate:"), QLineEdit::Normal, defaultName, &ok);
+  if (!ok || newName.trimmed().isEmpty())
+  {
+    return;
+  }
+
+  // hit::Node::clone() turned out not to be safe to use here. Confirmed
+  // against hit's own source: a clone shares the underlying WASP
+  // node-view (_hnv) with the node it was cloned from, and
+  // Field::setVal() mutates that shared view directly (not a per-node
+  // override the way setOverridePath() works for names) -- so editing a
+  // value on either the clone or the original afterward would silently
+  // edit both. Rendering the subtree to text and re-parsing it as its own
+  // independent document instead gives a genuinely independent copy --
+  // the same render()+parse() round-trip already relied on for "Apply
+  // Changes" on the Raw Text tab.
+  std::string renderedText = node->render();
+
+  std::vector<hit::ErrorMessage> errors;
+  hit::Node* tempRoot = nullptr;
+  try
+  {
+    tempRoot = hit::parse("duplicate_block", renderedText, &errors);
+  }
+  catch (const hit::Error&)
+  {
+  }
+  catch (...)
+  {
+  }
+
+  std::vector<hit::Node*> tempSections = tempRoot ? tempRoot->children(hit::NodeType::Section) : std::vector<hit::Node*>();
+  if (!tempRoot || !errors.empty() || tempSections.empty())
+  {
+    delete tempRoot;
+    QMessageBox::warning(this, tr("Duplicate failed"), tr("Could not duplicate this block."));
+    return;
+  }
+
+  hit::Node* clonedSection = tempSections.front();
+  clonedSection->setOverridePath(newName.trimmed().toStdString());
+
+  hit::Node* parentNode = node->parent();
+  parentNode->addChild(clonedSection);
+
+  // Deliberately NOT deleting tempRoot: clonedSection is still one of its
+  // children, and addChild() above only reassigns clonedSection's own
+  // parent pointer -- it doesn't remove clonedSection from tempRoot's own
+  // child list (hit provides no "detach from parent without deleting"
+  // primitive; confirmed Node::remove() is just `delete this`). Deleting
+  // tempRoot after reparenting would walk into its (stale) child list and
+  // delete clonedSection right along with it, which would silently
+  // destroy the very duplicate this just created. Leaking this small,
+  // otherwise-unreferenced root wrapper object is the safe tradeoff here
+  // -- bounded, one-time-per-duplicate, same spirit as other small
+  // documented leaks already accepted elsewhere in this plugin (e.g. the
+  // highlight reader not being torn down on panel close).
+
+  // The new sibling goes under the same tree parent as the item that was
+  // duplicated (nullptr means top-level, matching
+  // addTreeItemsRecursive()'s own convention).
+  this->addTreeItemsRecursive(item->parent(), clonedSection);
+  this->markDirty(true);
+}
+
 void MooseHitEditorPanel::onRemoveBlock()
 {
   QList<QTreeWidgetItem*> selected = this->Tree->selectedItems();
@@ -1254,6 +1370,14 @@ void MooseHitEditorPanel::onRemoveBlock()
   QTreeWidgetItem* item = selected.first();
   hit::Node* node = this->nodeForItem(item);
   if (!node || !node->parent())
+  {
+    return;
+  }
+
+  auto reply = QMessageBox::question(this, tr("Remove block?"),
+    tr("Remove [%1] and everything under it? This can't be undone.")
+      .arg(QString::fromStdString(node->path())));
+  if (reply != QMessageBox::Yes)
   {
     return;
   }
@@ -1551,6 +1675,14 @@ void MooseHitEditorPanel::onRemoveParamRow()
   {
     return;
   }
+
+  auto reply = QMessageBox::question(
+    this, tr("Remove parameter?"), tr("Remove '%1'?").arg(QString::fromStdString(fieldNode->path())));
+  if (reply != QMessageBox::Yes)
+  {
+    return;
+  }
+
   hit::Node* parentNode = fieldNode->parent();
   delete fieldNode;
   this->populateParamTableFor(parentNode);

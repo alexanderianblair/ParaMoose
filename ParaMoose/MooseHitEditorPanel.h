@@ -69,6 +69,7 @@ private slots:
   void onTreeSelectionChanged();
   void onTreeContextMenu(const QPoint& pos);
   void onAddTopLevelBlock();
+  void onDuplicateBlock();
   void onRemoveBlock();
 
   void onParamTableCellChanged(int row, int column);

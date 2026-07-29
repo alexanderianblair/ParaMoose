@@ -199,6 +199,43 @@ can't add a child block under it or remove it via the tree's context
 menu, and it disappears from the tree entirely (rather than showing up
 empty) once the input has no bare top-level parameters left.
 
+## Duplicating a block
+
+Right-click a block and choose **Duplicate Block** to make an independent
+copy - you're prompted for a name (defaults to `<original>_copy`), then
+the copy appears as a new sibling of the original.
+
+Worth knowing if you're reading the code rather than just using it:
+`hit::Node::clone()` looks like the obvious way to implement this, but
+turned out not to be safe here - confirmed against hit's own source that
+a clone shares the underlying WASP node-view with the node it was cloned
+from, and `Field::setVal()` mutates that shared view directly rather than
+through a per-node override. That would mean editing a value on either
+the duplicate or the original afterward silently edits both. Instead,
+**Duplicate Block** renders the subtree to text and re-parses it as its
+own independent document - the same `render()`/`parse()` round-trip
+already relied on for **Apply Changes** on the Raw Text tab - which gives
+a copy that shares nothing with the original. One consequence: the
+temporary parse-root wrapper produced along the way is deliberately never
+deleted (hit has no "detach a node from its parent without deleting it"
+primitive, so deleting that wrapper after reparenting the real duplicate
+out of it would delete the duplicate too) - a small, bounded, one-time
+memory leak per duplicate, the same tradeoff already accepted elsewhere
+in this plugin (e.g. the highlight reader not being torn down on panel
+close).
+
+## Resolved-value tooltips
+
+Any parameter whose value contains `${...}` shows what it actually
+resolves to as a tooltip - not just `boundary`/`block` (which additionally
+use the resolved value for mesh highlighting; see above). Hover over a
+value like `diffusivity = ${diff_coef}` to see what `diff_coef` actually
+is, without having to go hunt down where it's defined. Same
+`resolveBraceExpr()` machinery, same limitation: plain `${name}`
+substitution only, not expression forms like `${fparse ...}`.
+
+## Raw text preview
+
 The **Raw Text** tab (next to **Structured**) shows exactly what
 `render()` would write to disk - white text on black, monospace, editable.
 It's kept in sync with the structured tree/table view explicitly rather
@@ -365,13 +402,17 @@ that's what you're working with.
 2. Right-click empty space in the tree for **Add Top-Level Block** — this
    always adds a new `[BlockName]` at the top level, regardless of what's
    currently selected. Right-click an existing block for **Add Child
-   Block** (adds under that block) or **Remove Block**.
+   Block** (adds under that block), **Duplicate Block** (deep copy,
+   prompts for a new name - see "Duplicating a block" below), or
+   **Remove Block** (asks for confirmation first, since it's not
+   undoable).
 3. Click a block in the tree to see/edit its parameters in the table on the
    right. If the input has bare top-level parameters (see "Top-level
    parameters" below), an italicized *(top-level parameters)* item at the
    top of the tree works the same way.
 3. Use **Add Parameter** / **Remove Selected** under the table to edit
-   parameters for the selected block.
+   parameters for the selected block (removal also asks for confirmation
+   first).
 4. **Save** / **Save As...** writes the tree back out in hit format.
 5. Optionally set **App executable** to your compiled MOOSE app, then
    **Run + Load Result**. This shells out to `<exe> -i <file>`
